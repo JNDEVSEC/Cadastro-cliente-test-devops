@@ -1,1 +1,40 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - release/*
+      - hotfix/*
+      - feature/*
 
+parameters:
+  - name: qa_environment
+    type: string
+    default: 'dev'
+  - name: run_components_test
+    type: boolean
+    default: true
+  - name: skip_deploy
+    type: boolean
+    default: false
+
+resources:
+  repositories:
+    - repository: CorePipelines
+      name: Devops/jnsec.Core.Pipelines
+      type: git
+      ref: refs/tags/v1
+      endpoint: CorePipelines
+
+extends:
+  template: devops/templates/entrypoint.yaml@CorePipelines
+  parameters:
+    config:
+      pipelineType: app
+      technology: node
+      modelName: cliente-cadastro
+      branchingStrategy: trunkbased
+      params:
+        qa_environment: ${{ parameters.qa_environment }}
+        run_components_test: ${{ parameters.run_components_test }}
+        skip_deploy: ${{ parameters.skip_deploy }}
