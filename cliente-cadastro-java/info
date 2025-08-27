@@ -1,0 +1,10 @@
+Como rodar localmente
+# Compilar o projeto
+mvn clean install
+
+# Rodar o app
+mvn spring-boot:run
+
+🧪 Testar localmente
+# Executar testes unitários
+mvn test
