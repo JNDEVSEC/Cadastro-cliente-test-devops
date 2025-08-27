@@ -23,13 +23,13 @@ parameters:
 resources:
   repositories:
     - repository: CorePipelines
-      name: Devops/jnsec.Core.Pipelines
+      name: Devops-jnsec/jnsec.Core.Pipelines
       type: git
       ref: refs/tags/v1
       endpoint: CorePipelines
 
 extends:
-  template: devops/templates/entrypoint.yaml@CorePipelines
+  template: devops/templates/java/entrypoint.yaml@CorePipelines
   parameters:
     config:
       pipelineType: app
