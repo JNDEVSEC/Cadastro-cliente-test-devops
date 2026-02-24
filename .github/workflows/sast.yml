@@ -1,19 +1,89 @@
-name: SAST - Semgrep
-
+name: Security CI (Semgrep + Gitleaks + ESLint)
 on:
   pull_request:
   push:
     branches: [ "main" ]
+  schedule:
+    - cron: "0 3 * * *"  # varredura noturna (full scan)
 
 jobs:
-  semgrep:
+  eslint:
+    name: ESLint (security rules)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          config: "p/ci"
-          publishToken: ${{ secrets.SEMGREP_TOKEN }}
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          # Instale os plugins de segurança se ainda não estiverem no package.json:
+          npm i -D eslint @eslint/js eslint-plugin-security @microsoft/eslint-plugin-sdl
+
+      - name: Lint (fail on any security error)
+        run: |
+          npx eslint . --max-warnings=0
+
+  semgrep:
+    name: Semgrep (fail on high/critical)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # melhora diff-aware no PR
+
+      - name: Setup Python & Semgrep
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Semgrep
+        run: pip install --upgrade semgrep
+
+      - name: Semgrep on PRs (diff-aware)
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          # Rulepacks recomendados; ajuste conforme sua stack:
+          semgrep ci \
+            --config=p/owasp-top-ten \
+            --config=p/cwe-top-25 \
+            --severity=ERROR \
+            --error
+        # Observação: CLI suporta INFO|WARNING|ERROR; "CRITICAL" não é aceito como flag de severidade.
+        # Para tratar "crítico" explicitamente, crie rulepack próprio com 'severity: ERROR' nas regras críticas.
+
+      - name: Semgrep full scan (main/nightly)
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          semgrep scan \
+            --config=p/owasp-top-ten \
+            --config=p/cwe-top-25 \
+            --severity=ERROR \
+            --error \
+            .
+
+  gitleaks:
+    name: Gitleaks (secrets scanning)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Para repositórios de ORGANIZAÇÃO, adicione um secret GITLEAKS_LICENSE:
+          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+        # Por padrão, o job falha se houver segredos encontrados.
+``
