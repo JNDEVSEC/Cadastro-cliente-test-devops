@@ -1,1 +1,17 @@
+title = "Teste- Gitleaks"
+
+[allowlist]
+description = "Exceções controladas"
+paths = [
+  '''test/fixtures/.*''',
+  '''docs/.*\.md$'''
+]
+regexes = [
+  # Exemplo: chaves dummy apenas de exemplo didático
+  '''AKIAIOSFODNN7EXAMPLE'''
+]
+
+[rule]
+# Você pode adicionar regras customizadas ou herdar do default via --config
+``
 
