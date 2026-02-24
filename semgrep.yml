@@ -1,1 +1,8 @@
-
+# semgrep.yml (opcional: seu conjunto corporativo)
+rules:
+  - id: custom-no-eval
+    languages: [javascript, typescript]
+    message: "Evite eval() — risco de code injection."
+    severity: ERROR
+    pattern: eval($X)
+``
