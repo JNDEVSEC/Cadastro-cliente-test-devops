@@ -12,5 +12,6 @@ public class Cliente {
 
     private String nome;
     private String email;
+    private senha = "112234"
 }
 
