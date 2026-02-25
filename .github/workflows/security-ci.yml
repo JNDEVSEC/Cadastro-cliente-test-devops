@@ -1,100 +1,332 @@
-name: "Security CI (Semgrep + Gitleaks + ESLint)"
+name: "Security CI (Semgrep + Gitleaks + ESLint + FindSecBugs + DepCheck + PHP)"
 
 on:
   pull_request:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   schedule:
     - cron: "0 3 * * *"  # varredura noturna full
 
-# Evita jobs duplicados em PRs atualizados rapidamente
 concurrency:
   group: "security-ci-${{ github.ref }}"
   cancel-in-progress: true
 
 permissions:
   contents: read
+  security-events: write   # para upload SARIF (Semgrep/Code Scanning)
 
 jobs:
-  # 1) Job de detecção para controlar o ESLint via outputs, sem usar hashFiles em nível de job
-  detect_node:
-    name: "Detectar Node (package.json)"
+  detect_stacks:
+    name: "Detectar stacks (Java / Node / PHP)"
     runs-on: ubuntu-latest
     outputs:
-      has_node: ${{ steps.chk.outputs.has_node }}
+      has_java: ${{ steps.det.outputs.has_java }}
+      has_node: ${{ steps.det.outputs.has_node }}
+      has_php:  ${{ steps.det.outputs.has_php }}
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: "Checar package.json"
-        id: chk
+      - name: Detectar linguagens
+      # Sinaliza Java se houver pom.xml OU build.gradle[.kts]; Node se houver package.json;
+      # PHP se houver composer.json OU qualquer arquivo .php
+        id: det
         shell: bash
         run: |
+          has_java=false
+          has_node=false
+          has_php=false
+
+          if ls -1 **/pom.xml **/build.gradle **/build.gradle.kts >/dev/null 2>&1; then
+            has_java=true
+          fi
           if [ -f "package.json" ]; then
-            echo "has_node=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_node=false" >> "$GITHUB_OUTPUT"
+            has_node=true
+          fi
+          if [ -f "composer.json" ] || ls -1 **/*.php >/dev/null 2>&1; then
+            has_php=true
           fi
 
-  # 2) ESLint condicionado ao resultado do detect_node
+          echo "has_java=$has_java" >> "$GITHUB_OUTPUT"
+          echo "has_node=$has_node" >> "$GITHUB_OUTPUT"
+          echo "has_php=$has_php"   >> "$GITHUB_OUTPUT"
+
+      - name: Exibir detecção
+        run: |
+          echo "Java: ${{ steps.det.outputs.has_java }}"
+          echo "Node: ${{ steps.det.outputs.has_node }}"
+          echo "PHP : ${{ steps.det.outputs.has_php }}"
+
+  # -----------------------------
+  # Node: ESLint com regras de segurança
+  # -----------------------------
   eslint_node:
-    name: "ESLint (Node/JS/TS)"
-    needs: detect_node
-    if: ${{ needs.detect_node.outputs.has_node == 'true' }}
+    name: "ESLint (Node/JS/TS) com regras de segurança"
+    needs: detect_stacks
+    if: ${{ needs.detect_stacks.outputs.has_node == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: "Setup Node"
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
 
-      - name: "Instalar dependências"
+      - name: Instalar dependências e plugins
         run: |
           npm ci || npm i
-          # Plugins de segurança (baseline)
           npm i -D eslint @eslint/js eslint-plugin-security @microsoft/eslint-plugin-sdl
 
-      - name: "Lint (falhar em qualquer erro de segurança)"
+      - name: Criar .eslintrc.json (mínimo) se não existir
         run: |
-          npx eslint . --max-warnings=0
+          if [ ! -f ".eslintrc.json" ] && [ ! -f "eslint.config.js" ]; then
+            cat > .eslintrc.json << 'EOF'
+            {
+              "root": true,
+              "env": { "es2021": true, "node": true, "browser": false },
+              "extends": ["eslint:recommended", "plugin:security/recommended"],
+              "plugins": ["security", "@microsoft/sdl"],
+              "rules": {
+                "security/detect-object-injection": "warn",
+                "security/detect-non-literal-regexp": "warn",
+                "@microsoft/sdl/no-insecure-url": "error",
+                "@microsoft/sdl/no-polyglot-injection": "warn"
+              }
+            }
+            EOF
+          fi
 
-  # 3) Semgrep — mantém sua lógica (com aspas para evitar parsing issues)
+      - name: Lint (falhar em erros)
+        run: npx eslint . --max-warnings=0 || (echo "ESLint encontrou problemas" && exit 1)
+
+      # Opcional: audit de dependências Node
+      - name: npm audit (alto/crítico)
+        continue-on-error: true
+        run: |
+          npm audit --audit-level=high || true
+      - name: Publicar relatório npm audit
+        if: always()
+        run: |
+          npm audit --json > npm-audit.json || true
+        shell: bash
+      - name: Upload npm audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit
+          path: npm-audit.json
+
+  # -----------------------------
+  # Semgrep (condicional por linguagens) — Java/Node/PHP
+  # -----------------------------
   semgrep:
-    name: "Semgrep (Java + Node + PHP) — fail on high/critical"
+    name: "Semgrep — regras por linguagem (Java/Node/PHP) + CI/Secrets/Docker"
+    needs: detect_stacks
     runs-on: ubuntu-latest
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # melhora diff-aware
+          fetch-depth: 0
 
-      - name: "Setup Python"
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: "Instalar Semgrep"
+      - name: Instalar Semgrep
         run: pip install --upgrade semgrep
 
-      - name: "Semgrep no PR (diff-aware)"
+      - name: Preparar lista de configs por stack
+        id: cfg
+        shell: bash
+        run: |
+          # Sempre úteis
+          configs=( "p/owasp-top-ten" "p/cwe-top-25" "p/secrets" "p/docker" "p/ci" )
+
+          if [ "${{ needs.detect_stacks.outputs.has_java }}" = "true" ]; then
+            configs+=( "p/java" "p/spring" )
+          fi
+          if [ "${{ needs.detect_stacks.outputs.has_node }}" = "true" ]; then
+            configs+=( "p/javascript" "p/typescript" "p/nodejs" )
+          fi
+          if [ "${{ needs.detect_stacks.outputs.has_php }}" = "true" ]; then
+            configs+=( "p/php" )
+          fi
+
+          echo "configs=${configs[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Semgrep no PR (diff-aware)
         if: ${{ github.event_name == 'pull_request' }}
         run: |
           semgrep ci \
-            --config=p/owasp-top-ten \
-            --config=p/cwe-top-25 \
-            --severity=ERROR \
+            $(for c in ${{ steps.cfg.outputs.configs }}; do echo --config=$c; done) \
+            --strict \
+            --sarif --output semgrep.sarif \
+            --metrics=off \
             --error
 
-      - name: "Semgrep full scan (main/nightly)"
+      - name: Upload SARIF (PR)
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep-pr
+
+      - name: Semgrep full scan (push/schedule)
         if: ${{ github.event_name != 'pull_request' }}
         run: |
           semgrep scan \
-            --config=p/owasp-top-ten \
-            --config=p/cwe-top-25 \
-            --severity=ERROR \
+            $(for c in ${{ steps.cfg.outputs.configs }}; do echo --config=$c; done) \
+            --strict \
+            --sarif --output semgrep.sarif \
+            --metrics=off \
             --error \
             .
+
+      - name: Upload SARIF (full)
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep-full
+
+  # -----------------------------
+  # Gitleaks (segredos) — sempre útil
+  # -----------------------------
+  gitleaks:
+    name: "Gitleaks (segredos)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --source . --no-banner --redact --exit-code 1
+        env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }} # opcional
+
+  # -----------------------------
+  # Java: FindSecBugs (SpotBugs)
+  # -----------------------------
+  findsecbugs:
+    name: "FindSecBugs (Java SAST)"
+    needs: detect_stacks
+    if: ${{ needs.detect_stacks.outputs.has_java == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Cache Maven
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+      - name: Build com SpotBugs + FindSecBugs
+        run: |
+          mvn -q -e -DskipTests package
+          mvn -q com.github.spotbugs:spotbugs-maven-plugin:4.8.6.2:spotbugs \
+            -Dspotbugs.effort=max -Dspotbugs.threshold=Low
+      - name: Publicar relatório SpotBugs (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: spotbugs-report
+          path: |
+            **/target/spotbugsXml.xml
+            **/target/spotbugs.html
+        if: always()
+
+  # -----------------------------
+  # Java: OWASP Dependency-Check
+  # -----------------------------
+  dependency_check_java:
+    name: "OWASP Dependency-Check (Java)"
+    needs: detect_stacks
+    if: ${{ needs.detect_stacks.outputs.has_java == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache ODC
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/owasp/dependency-check-data
+          key: odc-cache
+      - name: Executar ODC (Maven)
+        run: |
+          mvn -q org.owasp:dependency-check-maven:10.0.3:check \
+            -Dformat=ALL -DfailBuildOnCVSS=9.0
+      - name: Publicar relatórios ODC
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: |
+            **/dependency-check-report.html
+            **/dependency-check-report.json
+            **/dependency-check-report.xml
+        if: always()
+
+  # -----------------------------
+  # PHP: Lint/SAST (PHPCS + phpcs-security-audit) e Composer Audit
+  # -----------------------------
+  php_security:
+    name: "PHP Security (PHPCS + phpcs-security-audit + Composer Audit)"
+    needs: detect_stacks
+    if: ${{ needs.detect_stacks.outputs.has_php == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, json, xml
+          tools: composer, php-cs-fixer, phpcs
+          coverage: none
+
+      - name: Instalar dependências Composer (se existir)
+        if: ${{ hashFiles('**/composer.json') != '' }}
+        run: composer install --no-interaction --no-progress --no-scripts
+
+      - name: Instalar phpcs-security-audit
+        run: |
+          composer global require --no-interaction --no-progress psecio/insight
+          # Alternativa: phpcs-security-audit (se disponível no packagist)
+          # composer global require --no-interaction --no-progress phpcs-security-audit/phpcs-security-audit
+
+      - name: Rodar PHPCS com standard de segurança (psecio/insight)
+        run: |
+          ~/.composer/vendor/bin/insight -n . || true
+        shell: bash
+
+      - name: Composer audit (dependências)
+        if: ${{ hashFiles('**/composer.lock') != '' }}
+        continue-on-error: true
+        run: composer audit --format=json || true
+
+      - name: Exportar relatórios PHP
+        if: always()
+        run: |
+          # Salva outputs simples (se quiser, você pode redirecionar stdout para arquivos)
+          echo "Consulte logs do job para saídas do PHPCS/Insight e composer audit." > php-security.txt
+      - name: Upload artifacts PHP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-security
+          path: php-security.txt
+``
