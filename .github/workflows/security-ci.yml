@@ -329,4 +329,3 @@ jobs:
         with:
           name: php-security
           path: php-security.txt
-``
