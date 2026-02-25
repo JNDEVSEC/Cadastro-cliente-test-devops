@@ -16,9 +16,31 @@ permissions:
   contents: read
 
 jobs:
+  # 1) Job de detecção para controlar o ESLint via outputs, sem usar hashFiles em nível de job
+  detect_node:
+    name: "Detectar Node (package.json)"
+    runs-on: ubuntu-latest
+    outputs:
+      has_node: ${{ steps.chk.outputs.has_node }}
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      - name: "Checar package.json"
+        id: chk
+        shell: bash
+        run: |
+          if [ -f "package.json" ]; then
+            echo "has_node=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_node=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # 2) ESLint condicionado ao resultado do detect_node
   eslint_node:
-    if: ${{ hashFiles('package.json') != '' }}
     name: "ESLint (Node/JS/TS)"
+    needs: detect_node
+    if: ${{ needs.detect_node.outputs.has_node == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: "Checkout"
@@ -33,12 +55,14 @@ jobs:
       - name: "Instalar dependências"
         run: |
           npm ci || npm i
+          # Plugins de segurança (baseline)
           npm i -D eslint @eslint/js eslint-plugin-security @microsoft/eslint-plugin-sdl
 
       - name: "Lint (falhar em qualquer erro de segurança)"
         run: |
           npx eslint . --max-warnings=0
 
+  # 3) Semgrep — mantém sua lógica (com aspas para evitar parsing issues)
   semgrep:
     name: "Semgrep (Java + Node + PHP) — fail on high/critical"
     runs-on: ubuntu-latest
@@ -46,7 +70,7 @@ jobs:
       - name: "Checkout"
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # melhora diff-aware
 
       - name: "Setup Python"
         uses: actions/setup-python@v5
@@ -65,7 +89,7 @@ jobs:
             --severity=ERROR \
             --error
 
-      - name: "Semgrep full (main/nightly)"
+      - name: "Semgrep full scan (main/nightly)"
         if: ${{ github.event_name != 'pull_request' }}
         run: |
           semgrep scan \
@@ -75,6 +99,7 @@ jobs:
             --error \
             .
 
+  # 4) Gitleaks — idem
   gitleaks:
     name: "Gitleaks (Secrets)"
     runs-on: ubuntu-latest
@@ -88,4 +113,5 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Para repositórios de ORGANIZAÇÃO, adicione um secret chamado GITLEAKS_LICENSE
           # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
