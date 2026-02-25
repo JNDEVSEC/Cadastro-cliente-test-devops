@@ -1,30 +1,43 @@
-package com.exemplo.clientes;
+package com.exemplo.seguranca;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.http.MediaType;
-import org.springframework.test.web.servlet.MockMvc;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.DisplayName;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.utility.DockerImageName;
 
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
-@SpringBootTest
-@AutoConfigureMockMvc
-public class ClienteControllerTest {
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-    @Autowired
-    private MockMvc mockMvc;
+public class VulnerableTargetsIT {
+
+    private static GenericContainer<?> juiceShop;
+
+    @BeforeAll
+    static void startContainers() {
+        juiceShop = new GenericContainer<>(DockerImageName.parse("bkimminich/juice-shop"))
+                .withExposedPorts(3000);
+        juiceShop.start();
+    }
+
+    @AfterAll
+    static void stopContainers() {
+        if (juiceShop != null) juiceShop.stop();
+    }
 
     @Test
-    public void deveCadastrarCliente() throws Exception {
-        String json = "{\"nome\": \"João\", \"email\": \"joao@email.com\"}";
-
-        mockMvc.perform(post("/clientes")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(json))
-                .andExpect(status().isCreated());
+    @DisplayName("Juice Shop deve responder 200 (alvo DAST disponível)")
+    void juiceShopIsReachable() throws Exception {
+        String baseUrl = "http://" + juiceShop.getHost() + ":" + juiceShop.getMappedPort(3000);
+        URL url = new URL(baseUrl);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setInstanceFollowRedirects(true);
+        conn.setConnectTimeout(5000);
+        conn.setReadTimeout(5000);
+        assertEquals(200, conn.getResponseCode());
     }
 }
-
