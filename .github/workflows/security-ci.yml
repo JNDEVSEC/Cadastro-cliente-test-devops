@@ -13,7 +13,7 @@ concurrency:
 
 permissions:
   contents: read
-  security-events: write   # para upload SARIF (Semgrep/Code Scanning)
+  security-events: write   # necessário para upload SARIF (Semgrep/Code Scanning)
 
 jobs:
   detect_stacks:
@@ -25,6 +25,7 @@ jobs:
       has_php:  ${{ steps.det.outputs.has_php }}
     steps:
       - name: Checkout
+      # traz apenas o código (sem submódulos)
         uses: actions/checkout@v4
 
       - name: Detectar linguagens
@@ -36,19 +37,22 @@ jobs:
           has_node=false
           has_php=false
 
-          if ls -1 **/pom.xml **/build.gradle **/build.gradle.kts >/dev/null 2>&1; then
+          # Detecta arquivos rastreados pelo git (mais confiável que ** glob)
+          if git ls-files | grep -E '(^|/)(pom\.xml|build\.gradle(\.kts)?)$' -q; then
             has_java=true
           fi
           if [ -f "package.json" ]; then
             has_node=true
           fi
-          if [ -f "composer.json" ] || ls -1 **/*.php >/dev/null 2>&1; then
+          if [ -f "composer.json" ] || git ls-files '*.php' | head -n1 >/dev/null; then
             has_php=true
           fi
 
-          echo "has_java=$has_java" >> "$GITHUB_OUTPUT"
-          echo "has_node=$has_node" >> "$GITHUB_OUTPUT"
-          echo "has_php=$has_php"   >> "$GITHUB_OUTPUT"
+          {
+            echo "has_java=$has_java"
+            echo "has_node=$has_node"
+            echo "has_php=$has_php"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Exibir detecção
         run: |
@@ -172,6 +176,15 @@ jobs:
           IFS=, eval 'csv="${configs[*]}"'
           echo "configs_csv=$csv" >> "$GITHUB_OUTPUT"
 
+      # Ignora YAML que causou parse error (evita exit 2 com --strict)
+      - name: Ignorar arquivos problemáticos no Semgrep
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "semgrep.yml"
+          } >> .semgrepignore
+
       - name: Semgrep no PR (diff-aware)
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash
@@ -248,28 +261,29 @@ jobs:
             semgrep_stderr.log
 
   # -----------------------------
-  # Gitleaks (segredos) — SEM customização
+  # Gitleaks (segredos) — SEM customização (v2 via env)
   # -----------------------------
   gitleaks:
     name: "Gitleaks (segredos)"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # permite comentar em PRs, quando aplicável
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Run Gitleaks v2 (config padrão)
+      - name: Run Gitleaks v2 (config padrão, org requer licença)
         uses: gitleaks/gitleaks-action@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}                 # exigido pela action v2
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}         # obrigatório se o repo for de ORGANIZAÇÃO
-          # Nenhuma configuração customizada. Se quiser um TOML no futuro:
-          # GITLEAKS_CONFIG: .gitleaks.toml
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Obrigatório para repositório de ORGANIZAÇÃO (adicione em Settings → Secrets):
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
           GITLEAKS_ENABLE_SUMMARY: "true"
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
-        # Observação: a v2 da action é configurada por ENV, não por `with:/args`.
-        # (Evita o warning "Unexpected input(s) 'args'")  # ref: README da action
+        # A v2 oficial usa apenas variáveis de ambiente (não usar `with:/args`). cite: gitleaks action v2 README
 
   # -----------------------------
   # Java: FindSecBugs (SpotBugs)
@@ -399,6 +413,9 @@ jobs:
       - name: Upload artifacts PHP
         if: always()
         uses: actions/upload-artifact@v4
+        with:
+          name: php-security
+          path: php-security.txt
         with:
           name: php-security
           path: php-security.txt
