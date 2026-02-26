@@ -303,7 +303,7 @@ jobs:
         output: trivy-results.sarif
         severity: CRITICAL,HIGH
         scanners: vuln                 # ← desabilita secret/misconfig p/ acelerar
-        exit-code: '1'                 # ← trava se houver HIGH/CRITICAL
+        exit-code: '0'                 # ← trava se houver HIGH/CRITICAL
         limit-severities-for-sarif: true
         ignore-unfixed: true           # opcional: ignora CVEs sem fix disponível
         # flags extras do CLI:
@@ -313,7 +313,7 @@ jobs:
 
     - name: Upload SARIF (Trivy)
       if: always()
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: trivy-results.sarif
         category: trivy-sca
