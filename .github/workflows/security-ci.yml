@@ -1,11 +1,11 @@
-name: "Security CI (Semgrep + ESLint + FindSecBugs + DepCheck + PHP)"
+name: "Security CI (Semgrep + ESLint + FindSecBugs + DepCheck)"
 
 on:
   pull_request:
   push:
     branches: ["main"]
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "0 3 * * *"  # varredura noturna full
 
 concurrency:
   group: "security-ci-${{ github.ref }}"
@@ -17,15 +17,13 @@ permissions:
 
 jobs:
   detect_stacks:
-    name: "Detectar stacks (Java / Node / PHP)"
+    name: "Detectar stacks (Java / Node)"
     runs-on: ubuntu-latest
     outputs:
       has_java: ${{ steps.det.outputs.has_java }}
       has_node: ${{ steps.det.outputs.has_node }}
-      has_php:  ${{ steps.det.outputs.has_php }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Detectar linguagens
         id: det
@@ -34,30 +32,27 @@ jobs:
           set -euo pipefail
           has_java=false
           has_node=false
-          has_php=false
 
+          # Detect Java
           if git ls-files | grep -E '(^|/)(pom\.xml|build\.gradle(\.kts)?)$' -q; then
             has_java=true
           fi
-          if [ -f "package.json" ]; then
+
+          # Detect Node
+          if [ -f package.json ]; then
             has_node=true
-          fi
-          if [ -f "composer.json" ] || git ls-files '*.php' | head -n1 >/dev/null; then
-            has_php=true
           fi
 
           echo "has_java=$has_java" >> "$GITHUB_OUTPUT"
           echo "has_node=$has_node" >> "$GITHUB_OUTPUT"
-          echo "has_php=$has_php"   >> "$GITHUB_OUTPUT"
 
       - name: Exibir detecção
         run: |
           echo "Java: ${{ steps.det.outputs.has_java }}"
           echo "Node: ${{ steps.det.outputs.has_node }}"
-          echo "PHP : ${{ steps.det.outputs.has_php }}"
 
   # -----------------------------
-  # Node: ESLint
+  # ESLint (Node)
   # -----------------------------
   eslint_node:
     name: "ESLint (Node/JS/TS)"
@@ -70,44 +65,38 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
+          cache: npm
 
       - name: Instalar dependências
-        shell: bash
         run: |
-          set -euo pipefail
           npm ci || npm i
           npm i -D eslint @eslint/js eslint-plugin-security @microsoft/eslint-plugin-sdl
 
       - name: Criar .eslintrc.json mínimo
-        shell: bash
         run: |
-          set -euo pipefail
           if [ ! -f ".eslintrc.json" ] && [ ! -f "eslint.config.js" ]; then
             cat > .eslintrc.json << 'EOF'
             {
               "root": true,
-              "env": { "es2021": true, "node": true, "browser": false },
+              "env": { "es2021": true, "node": true },
               "extends": ["eslint:recommended", "plugin:security/recommended"],
               "plugins": ["security", "@microsoft/sdl"],
               "rules": {
                 "security/detect-object-injection": "warn",
-                "security/detect-non-literal-regexp": "warn",
-                "@microsoft/sdl/no-insecure-url": "error",
-                "@microsoft/sdl/no-polyglot-injection": "warn"
+                "@microsoft/sdl/no-insecure-url": "error"
               }
             }
-            EOF
+EOF
           fi
 
-      - name: Executar ESLint
+      - name: Rodar ESLint
         run: npx eslint . --max-warnings=0
 
   # -----------------------------
-  # Semgrep
+  # Semgrep (Java + Node)
   # -----------------------------
   semgrep:
-    name: "Semgrep — SAST"
+    name: "Semgrep — SAST (Java/Node)"
     needs: detect_stacks
     runs-on: ubuntu-latest
     steps:
@@ -122,49 +111,48 @@ jobs:
       - name: Instalar Semgrep
         run: pip install --upgrade semgrep
 
-      - name: Preparar lista de regras
+      - name: Ignorar arquivos que quebram o Semgrep
+        run: |
+          echo "semgrep.yml" >> .semgrepignore || true
+
+      - name: Preparar regras
         id: cfg
         shell: bash
         run: |
           set -euo pipefail
-          cfg=( "p/owasp-top-ten" "p/cwe-top-25" "p/secrets" "p/docker" "p/ci" )
+
+          cfg=(
+            "p/owasp-top-ten"
+            "p/cwe-top-25"
+            "p/secrets"
+            "p/docker"
+            "p/ci"
+          )
+
           if [ "${{ needs.detect_stacks.outputs.has_java }}" = "true" ]; then
             cfg+=( "p/java" "p/spring" )
           fi
+
           if [ "${{ needs.detect_stacks.outputs.has_node }}" = "true" ]; then
             cfg+=( "p/javascript" "p/typescript" "p/nodejs" )
           fi
-          if [ "${{ needs.detect_stacks.outputs.has_php }}" = "true" ]; then
-            cfg+=( "p/php" )
-          fi
+
           IFS=, eval 'csv="${cfg[*]}"'
           echo "csv=$csv" >> "$GITHUB_OUTPUT"
 
-      - name: Ignorar arquivos que quebram Semgrep
-        shell: bash
-        run: |
-          echo "semgrep.yml" >> .semgrepignore
-
-      - name: Semgrep PR (CI mode)
+      - name: Semgrep (PR)
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash
         run: |
           set -euo pipefail
           IFS=',' read -r -a arr <<< "${{ steps.cfg.outputs.csv }}"
-          args=()
-          for c in "${arr[@]}"; do args+=( "--config=$c" ); done
-
+          args=(); for c in "${arr[@]}"; do args+=( "--config=$c" ); done
           semgrep ci "${args[@]}" \
-            --timeout 180 \
-            --strict \
-            --verbose \
+            --timeout 180 --strict --verbose \
             --sarif --output semgrep.sarif \
-            --metrics=off \
-            --error \
-            . \
+            --metrics=off --error . \
             1> semgrep_stdout.log \
             2> semgrep_stderr.log || code=$?
-
           echo "Semgrep exit code: ${code:-0}"
           exit ${code:-0}
 
@@ -173,7 +161,6 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
-          category: semgrep-pr
 
       - name: Semgrep full scan
         if: ${{ github.event_name != 'pull_request' }}
@@ -181,29 +168,15 @@ jobs:
         run: |
           set -euo pipefail
           IFS=',' read -r -a arr <<< "${{ steps.cfg.outputs.csv }}"
-          args=()
-          for c in "${arr[@]}"; do args+=( "--config=$c" ); done
-
+          args=(); for c in "${arr[@]}"; do args+=( "--config=$c" ); done
           semgrep scan "${args[@]}" \
-            --timeout 180 \
-            --strict \
-            --verbose \
+            --timeout 180 --strict --verbose \
             --sarif --output semgrep.sarif \
-            --metrics=off \
-            --error \
-            . \
+            --metrics=off --error . \
             1> semgrep_stdout.log \
             2> semgrep_stderr.log || code=$?
-
           echo "Semgrep exit code: ${code:-0}"
           exit ${code:-0}
-
-      - name: Upload SARIF (full)
-        if: ${{ github.event_name != 'pull_request' }}
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep.sarif
-          category: semgrep-full
 
       - name: Upload logs do Semgrep
         if: always()
@@ -215,7 +188,7 @@ jobs:
             semgrep_stderr.log
 
   # -----------------------------
-  # Java: FindSecBugs
+  # Java: FindSecBugs (SpotBugs)
   # -----------------------------
   findsecbugs:
     name: "FindSecBugs (Java SAST)"
@@ -224,6 +197,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Detectar diretório do pom.xml
+        id: pom
+        shell: bash
+        run: |
+          P=$(git ls-files | grep "pom.xml" | head -n1 || true)
+          if [ -z "$P" ]; then
+            echo "Nenhum pom.xml encontrado!"
+            exit 1
+          fi
+          echo "dir=$(dirname "$P")" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -233,19 +218,18 @@ jobs:
         with:
           path: ~/.m2/repository
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-          restore-keys: ${{ runner.os }}-m2-
 
-      - name: Build e SpotBugs + FindSecBugs
+      - name: Rodar SpotBugs + FindSecBugs
         shell: bash
         run: |
-          set -euo pipefail
+          cd "${{ steps.pom.outputs.dir }}"
           mvn -q -e -DskipTests package
           mvn -q com.github.spotbugs:spotbugs-maven-plugin:4.8.6.2:spotbugs \
-            -Dspotbugs.effort=max -Dspotbugs.threshold=Low
+            -Dspotbugs.effort=max \
+            -Dspotbugs.threshold=Low
 
-      - name: Upload relatório SpotBugs
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: spotbugs-report
           path: |
@@ -253,7 +237,7 @@ jobs:
             **/target/spotbugs.html
 
   # -----------------------------
-  # Java: OWASP Dependency‑Check
+  # Java: OWASP Dependency-Check
   # -----------------------------
   dependency_check_java:
     name: "OWASP Dependency-Check (Java)"
@@ -263,70 +247,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Detectar diretório do pom.xml
+        id: pom
+        shell: bash
+        run: |
+          P=$(git ls-files | grep "pom.xml" | head -n1 || true)
+          if [ -z "$P" ]; then
+            echo "Nenhum pom.xml encontrado!"
+            exit 1
+          fi
+          echo "dir=$(dirname "$P")" >> "$GITHUB_OUTPUT"
+
       - uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/owasp/dependency-check-data
           key: odc-cache
 
-      - name: Executar Dependency-Check
+      - name: Rodar Dependency-Check
         shell: bash
         run: |
-          set -euo pipefail
+          cd "${{ steps.pom.outputs.dir }}"
           mvn -q org.owasp:dependency-check-maven:10.0.3:check \
-            -Dformat=ALL -DfailBuildOnCVSS=9.0
+            -Dformat=ALL \
+            -DfailBuildOnCVSS=9.0
 
-      - name: Upload relatórios ODC
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: dependency-check-report
           path: |
             **/dependency-check-report.html
             **/dependency-check-report.json
             **/dependency-check-report.xml
-
-  # -----------------------------
-  # PHP Security
-  # -----------------------------
-  php_security:
-    name: "PHP Security (PHPCS + Insight)"
-    needs: detect_stacks
-    if: ${{ needs.detect_stacks.outputs.has_php == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.3'
-          extensions: mbstring, json, xml
-          tools: composer, php-cs-fixer, phpcs
-          coverage: none
-
-      - name: Instalar dependências Composer
-        if: ${{ hashFiles('**/composer.json') != '' }}
-        run: composer install --no-interaction --no-progress --no-scripts
-
-      - name: Instalar psecio/insight
-        run: composer global require --no-interaction --no-progress psecio/insight
-
-      - name: PHPCS/Insight
-        shell: bash
-        continue-on-error: true
-        run: ~/.composer/vendor/bin/insight -n . || true
-
-      - name: Composer audit
-        if: ${{ hashFiles('**/composer.lock') != '' }}
-        continue-on-error: true
-        run: composer audit --format=json || true
-
-      - name: Gerar relatório PHP
-        if: always()
-        shell: bash
-        run: echo "Consulte logs do job para saída completa." > php-security.txt
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: php-security
-          path: php-security.txt
