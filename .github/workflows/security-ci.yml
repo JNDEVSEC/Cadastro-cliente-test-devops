@@ -5,7 +5,7 @@ on:
   push:
     branches: ["main"]
   schedule:
-    - cron: "0 3 * * *"  # varredura noturna full
+    - cron: "0 3 * * *"
 
 concurrency:
   group: "security-ci-${{ github.ref }}"
@@ -23,7 +23,8 @@ jobs:
       has_java: ${{ steps.det.outputs.has_java }}
       has_node: ${{ steps.det.outputs.has_node }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Detectar linguagens
         id: det
@@ -33,18 +34,19 @@ jobs:
           has_java=false
           has_node=false
 
-          # Detect Java
+          # Detect Java (pom.xml ou Gradle)
           if git ls-files | grep -E '(^|/)(pom\.xml|build\.gradle(\.kts)?)$' -q; then
             has_java=true
           fi
-
           # Detect Node
           if [ -f package.json ]; then
             has_node=true
           fi
 
-          echo "has_java=$has_java" >> "$GITHUB_OUTPUT"
-          echo "has_node=$has_node" >> "$GITHUB_OUTPUT"
+          {
+            echo "has_java=$has_java"
+            echo "has_node=$has_node"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Exibir detecção
         run: |
@@ -60,36 +62,41 @@ jobs:
     if: ${{ needs.detect_stacks.outputs.has_node == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
 
       - name: Instalar dependências
+        shell: bash
         run: |
+          set -euo pipefail
           npm ci || npm i
           npm i -D eslint @eslint/js eslint-plugin-security @microsoft/eslint-plugin-sdl
 
-      - name: Criar .eslintrc.json mínimo
+      - name: Criar .eslintrc.json mínimo (sem here-doc)
+        shell: bash
         run: |
+          set -euo pipefail
           if [ ! -f ".eslintrc.json" ] && [ ! -f "eslint.config.js" ]; then
-            cat > .eslintrc.json << 'EOF'
-            {
-              "root": true,
-              "env": { "es2021": true, "node": true },
-              "extends": ["eslint:recommended", "plugin:security/recommended"],
-              "plugins": ["security", "@microsoft/sdl"],
-              "rules": {
-                "security/detect-object-injection": "warn",
-                "@microsoft/sdl/no-insecure-url": "error"
-              }
-            }
-EOF
+            printf '%s\n' \
+            '{' \
+            '  "root": true,' \
+            '  "env": { "es2021": true, "node": true },' \
+            '  "extends": ["eslint:recommended", "plugin:security/recommended"],' \
+            '  "plugins": ["security", "@microsoft/sdl"],' \
+            '  "rules": {' \
+            '    "security/detect-object-injection": "warn",' \
+            '    "@microsoft/sdl/no-insecure-url": "error"' \
+            '  }' \
+            '}' > .eslintrc.json
           fi
 
-      - name: Rodar ESLint
+      - name: Rodar ESLint (falhar em warnings)
         run: npx eslint . --max-warnings=0
 
   # -----------------------------
@@ -100,19 +107,26 @@ EOF
     needs: detect_stacks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Instalar Semgrep
-        run: pip install --upgrade semgrep
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install --upgrade semgrep
 
       - name: Ignorar arquivos que quebram o Semgrep
+        shell: bash
         run: |
+          set -euo pipefail
           echo "semgrep.yml" >> .semgrepignore || true
 
       - name: Preparar regras
@@ -120,23 +134,13 @@ EOF
         shell: bash
         run: |
           set -euo pipefail
-
-          cfg=(
-            "p/owasp-top-ten"
-            "p/cwe-top-25"
-            "p/secrets"
-            "p/docker"
-            "p/ci"
-          )
-
+          cfg=( "p/owasp-top-ten" "p/cwe-top-25" "p/secrets" "p/docker" "p/ci" )
           if [ "${{ needs.detect_stacks.outputs.has_java }}" = "true" ]; then
             cfg+=( "p/java" "p/spring" )
           fi
-
           if [ "${{ needs.detect_stacks.outputs.has_node }}" = "true" ]; then
             cfg+=( "p/javascript" "p/typescript" "p/nodejs" )
           fi
-
           IFS=, eval 'csv="${cfg[*]}"'
           echo "csv=$csv" >> "$GITHUB_OUTPUT"
 
@@ -147,6 +151,7 @@ EOF
           set -euo pipefail
           IFS=',' read -r -a arr <<< "${{ steps.cfg.outputs.csv }}"
           args=(); for c in "${arr[@]}"; do args+=( "--config=$c" ); done
+          echo "=== Semgrep version ==="; semgrep --version || true
           semgrep ci "${args[@]}" \
             --timeout 180 --strict --verbose \
             --sarif --output semgrep.sarif \
@@ -169,6 +174,7 @@ EOF
           set -euo pipefail
           IFS=',' read -r -a arr <<< "${{ steps.cfg.outputs.csv }}"
           args=(); for c in "${arr[@]}"; do args+=( "--config=$c" ); done
+          echo "=== Semgrep version ==="; semgrep --version || true
           semgrep scan "${args[@]}" \
             --timeout 180 --strict --verbose \
             --sarif --output semgrep.sarif \
@@ -196,12 +202,14 @@ EOF
     if: ${{ needs.detect_stacks.outputs.has_java == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Detectar diretório do pom.xml
         id: pom
         shell: bash
         run: |
+          set -euo pipefail
           P=$(git ls-files | grep "pom.xml" | head -n1 || true)
           if [ -z "$P" ]; then
             echo "Nenhum pom.xml encontrado!"
@@ -209,12 +217,14 @@ EOF
           fi
           echo "dir=$(dirname "$P")" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-java@v4
+      - name: Setup JDK
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - uses: actions/cache@v4
+      - name: Cache Maven
+        uses: actions/cache@v4
         with:
           path: ~/.m2/repository
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
@@ -222,14 +232,16 @@ EOF
       - name: Rodar SpotBugs + FindSecBugs
         shell: bash
         run: |
+          set -euo pipefail
           cd "${{ steps.pom.outputs.dir }}"
           mvn -q -e -DskipTests package
           mvn -q com.github.spotbugs:spotbugs-maven-plugin:4.8.6.2:spotbugs \
             -Dspotbugs.effort=max \
             -Dspotbugs.threshold=Low
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload relatórios SpotBugs
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: spotbugs-report
           path: |
@@ -245,12 +257,14 @@ EOF
     if: ${{ needs.detect_stacks.outputs.has_java == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Detectar diretório do pom.xml
         id: pom
         shell: bash
         run: |
+          set -euo pipefail
           P=$(git ls-files | grep "pom.xml" | head -n1 || true)
           if [ -z "$P" ]; then
             echo "Nenhum pom.xml encontrado!"
@@ -258,7 +272,8 @@ EOF
           fi
           echo "dir=$(dirname "$P")" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v4
+      - name: Cache ODC
+        uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/owasp/dependency-check-data
           key: odc-cache
@@ -266,13 +281,15 @@ EOF
       - name: Rodar Dependency-Check
         shell: bash
         run: |
+          set -euo pipefail
           cd "${{ steps.pom.outputs.dir }}"
           mvn -q org.owasp:dependency-check-maven:10.0.3:check \
             -Dformat=ALL \
             -DfailBuildOnCVSS=9.0
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload relatórios ODC
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: dependency-check-report
           path: |
