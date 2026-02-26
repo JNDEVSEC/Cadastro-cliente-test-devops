@@ -28,11 +28,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Detectar linguagens
-      # Sinaliza Java se houver pom.xml OU build.gradle[.kts]; Node se houver package.json;
-      # PHP se houver composer.json OU qualquer arquivo .php
         id: det
         shell: bash
         run: |
+          set -euo pipefail
           has_java=false
           has_node=false
           has_php=false
@@ -76,12 +75,16 @@ jobs:
           cache: "npm"
 
       - name: Instalar dependências e plugins
+        shell: bash
         run: |
+          set -euo pipefail
           npm ci || npm i
           npm i -D eslint @eslint/js eslint-plugin-security @microsoft/eslint-plugin-sdl
 
       - name: Criar .eslintrc.json (mínimo) se não existir
+        shell: bash
         run: |
+          set -euo pipefail
           if [ ! -f ".eslintrc.json" ] && [ ! -f "eslint.config.js" ]; then
             cat > .eslintrc.json << 'EOF'
             {
@@ -100,18 +103,26 @@ jobs:
           fi
 
       - name: Lint (falhar em erros)
-        run: npx eslint . --max-warnings=0 || (echo "ESLint encontrou problemas" && exit 1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx eslint . --max-warnings=0
 
       # Opcional: audit de dependências Node
       - name: npm audit (alto/crítico)
+        shell: bash
         continue-on-error: true
         run: |
+          set -euo pipefail
           npm audit --audit-level=high || true
+
       - name: Publicar relatório npm audit
         if: always()
-        run: |
-          npm audit --json > npm-audit.json || true
         shell: bash
+        run: |
+          set -euo pipefail
+          npm audit --json > npm-audit.json || true
+
       - name: Upload npm audit
         if: always()
         uses: actions/upload-artifact@v4
@@ -138,15 +149,17 @@ jobs:
           python-version: "3.11"
 
       - name: Instalar Semgrep
-        run: pip install --upgrade semgrep
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install --upgrade semgrep
 
       - name: Preparar lista de configs por stack
         id: cfg
         shell: bash
         run: |
-          # Sempre úteis
+          set -euo pipefail
           configs=( "p/owasp-top-ten" "p/cwe-top-25" "p/secrets" "p/docker" "p/ci" )
-
           if [ "${{ needs.detect_stacks.outputs.has_java }}" = "true" ]; then
             configs+=( "p/java" "p/spring" )
           fi
@@ -156,18 +169,35 @@ jobs:
           if [ "${{ needs.detect_stacks.outputs.has_php }}" = "true" ]; then
             configs+=( "p/php" )
           fi
-
-          echo "configs=${configs[*]}" >> "$GITHUB_OUTPUT"
+          IFS=, eval 'csv="${configs[*]}"'
+          echo "configs_csv=$csv" >> "$GITHUB_OUTPUT"
 
       - name: Semgrep no PR (diff-aware)
         if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
         run: |
-          semgrep ci \
-            $(for c in ${{ steps.cfg.outputs.configs }}; do echo --config=$c; done) \
+          set -euo pipefail
+          echo "=== Semgrep version ==="
+          semgrep --version || true
+          IFS=',' read -r -a arr <<< "${{ steps.cfg.outputs.configs_csv }}"
+          args=(); for c in "${arr[@]}"; do args+=( "--config=$c" ); done
+          semgrep ci "${args[@]}" \
+            --timeout 180 \
             --strict \
+            --verbose \
             --sarif --output semgrep.sarif \
             --metrics=off \
-            --error
+            --error \
+            . \
+            1> semgrep_stdout.log \
+            2> semgrep_stderr.log || code=$?
+          code=${code:-0}
+          echo "Semgrep exit code: $code"
+          if [ "$code" -eq 2 ]; then
+            echo "---- semgrep_stderr.log (tail) ----"
+            tail -n 120 semgrep_stderr.log || true
+          fi
+          exit "$code"
 
       - name: Upload SARIF (PR)
         if: ${{ github.event_name == 'pull_request' }}
@@ -178,14 +208,28 @@ jobs:
 
       - name: Semgrep full scan (push/schedule)
         if: ${{ github.event_name != 'pull_request' }}
+        shell: bash
         run: |
-          semgrep scan \
-            $(for c in ${{ steps.cfg.outputs.configs }}; do echo --config=$c; done) \
+          set -euo pipefail
+          IFS=',' read -r -a arr <<< "${{ steps.cfg.outputs.configs_csv }}"
+          args=(); for c in "${arr[@]}"; do args+=( "--config=$c" ); done
+          semgrep scan "${args[@]}" \
+            --timeout 180 \
             --strict \
+            --verbose \
             --sarif --output semgrep.sarif \
             --metrics=off \
             --error \
-            .
+            . \
+            1> semgrep_stdout.log \
+            2> semgrep_stderr.log || code=$?
+          code=${code:-0}
+          echo "Semgrep exit code: $code"
+          if [ "$code" -eq 2 ]; then
+            echo "---- semgrep_stderr.log (tail) ----"
+            tail -n 120 semgrep_stderr.log || true
+          fi
+          exit "$code"
 
       - name: Upload SARIF (full)
         if: ${{ github.event_name != 'pull_request' }}
@@ -194,8 +238,17 @@ jobs:
           sarif_file: semgrep.sarif
           category: semgrep-full
 
-# -----------------------------
-  # Gitleaks (segredos) — sempre útil
+      - name: Upload logs do Semgrep
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-logs
+          path: |
+            semgrep_stdout.log
+            semgrep_stderr.log
+
+  # -----------------------------
+  # Gitleaks (segredos) — SEM customização
   # -----------------------------
   gitleaks:
     name: "Gitleaks (segredos)"
@@ -205,12 +258,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Run Gitleaks
+
+      - name: Run Gitleaks v2 (config padrão)
         uses: gitleaks/gitleaks-action@v2
-        with:
-          args: detect --source . --no-banner --redact --exit-code 1
         env:
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }} # opcional
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}                 # exigido pela action v2
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}         # obrigatório se o repo for de ORGANIZAÇÃO
+          # Nenhuma configuração customizada. Se quiser um TOML no futuro:
+          # GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_SUMMARY: "true"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
+        # Observação: a v2 da action é configurada por ENV, não por `with:/args`.
+        # (Evita o warning "Unexpected input(s) 'args'")  # ref: README da action
+
   # -----------------------------
   # Java: FindSecBugs (SpotBugs)
   # -----------------------------
@@ -234,18 +294,20 @@ jobs:
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-m2-
       - name: Build com SpotBugs + FindSecBugs
+        shell: bash
         run: |
+          set -euo pipefail
           mvn -q -e -DskipTests package
           mvn -q com.github.spotbugs:spotbugs-maven-plugin:4.8.6.2:spotbugs \
             -Dspotbugs.effort=max -Dspotbugs.threshold=Low
       - name: Publicar relatório SpotBugs (artifact)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: spotbugs-report
           path: |
             **/target/spotbugsXml.xml
             **/target/spotbugs.html
-        if: always()
 
   # -----------------------------
   # Java: OWASP Dependency-Check
@@ -264,10 +326,13 @@ jobs:
           path: ~/.m2/repository/org/owasp/dependency-check-data
           key: odc-cache
       - name: Executar ODC (Maven)
+        shell: bash
         run: |
+          set -euo pipefail
           mvn -q org.owasp:dependency-check-maven:10.0.3:check \
             -Dformat=ALL -DfailBuildOnCVSS=9.0
       - name: Publicar relatórios ODC
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dependency-check-report
@@ -275,13 +340,12 @@ jobs:
             **/dependency-check-report.html
             **/dependency-check-report.json
             **/dependency-check-report.xml
-        if: always()
 
   # -----------------------------
-  # PHP: Lint/SAST (PHPCS + phpcs-security-audit) e Composer Audit
+  # PHP: Lint/SAST (PHPCS + psecio/insight) e Composer Audit
   # -----------------------------
   php_security:
-    name: "PHP Security (PHPCS + phpcs-security-audit + Composer Audit)"
+    name: "PHP Security (PHPCS + psecio/insight + Composer Audit)"
     needs: detect_stacks
     if: ${{ needs.detect_stacks.outputs.has_php == 'true' }}
     runs-on: ubuntu-latest
@@ -299,29 +363,39 @@ jobs:
 
       - name: Instalar dependências Composer (se existir)
         if: ${{ hashFiles('**/composer.json') != '' }}
-        run: composer install --no-interaction --no-progress --no-scripts
-
-      - name: Instalar phpcs-security-audit
-        run: |
-          composer global require --no-interaction --no-progress psecio/insight
-          # Alternativa: phpcs-security-audit (se disponível no packagist)
-          # composer global require --no-interaction --no-progress phpcs-security-audit/phpcs-security-audit
-
-      - name: Rodar PHPCS com standard de segurança (psecio/insight)
-        run: |
-          ~/.composer/vendor/bin/insight -n . || true
         shell: bash
+        run: |
+          set -euo pipefail
+          composer install --no-interaction --no-progress --no-scripts
+
+      - name: Instalar psecio/insight (security rules)
+        shell: bash
+        run: |
+          set -euo pipefail
+          composer global require --no-interaction --no-progress psecio/insight
+
+      - name: Rodar Insight (PHPCS security) - saída no log
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ~/.composer/vendor/bin/insight -n . || true
 
       - name: Composer audit (dependências)
         if: ${{ hashFiles('**/composer.lock') != '' }}
+        shell: bash
         continue-on-error: true
-        run: composer audit --format=json || true
-
-      - name: Exportar relatórios PHP
-        if: always()
         run: |
-          # Salva outputs simples (se quiser, você pode redirecionar stdout para arquivos)
-          echo "Consulte logs do job para saídas do PHPCS/Insight e composer audit." > php-security.txt
+          set -euo pipefail
+          composer audit --format=json || true
+
+      - name: Exportar apontadores de relatório
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Consulte logs do job para saídas do Insight/PHPCS e composer audit." > php-security.txt
+
       - name: Upload artifacts PHP
         if: always()
         uses: actions/upload-artifact@v4
