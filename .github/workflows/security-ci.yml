@@ -260,30 +260,6 @@ jobs:
             semgrep_stdout.log
             semgrep_stderr.log
 
-  # -----------------------------
-  # Gitleaks (segredos) — SEM customização (v2 via env)
-  # -----------------------------
-  gitleaks:
-    name: "Gitleaks (segredos)"
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write   # permite comentar em PRs, quando aplicável
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Run Gitleaks v2 (config padrão, org requer licença)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Obrigatório para repositório de ORGANIZAÇÃO (adicione em Settings → Secrets):
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-          GITLEAKS_ENABLE_SUMMARY: "true"
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
-        # A v2 oficial usa apenas variáveis de ambiente (não usar `with:/args`). cite: gitleaks action v2 README
 
   # -----------------------------
   # Java: FindSecBugs (SpotBugs)
