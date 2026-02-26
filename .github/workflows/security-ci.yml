@@ -194,7 +194,23 @@ jobs:
           sarif_file: semgrep.sarif
           category: semgrep-full
 
-
+# -----------------------------
+  # Gitleaks (segredos) — sempre útil
+  # -----------------------------
+  gitleaks:
+    name: "Gitleaks (segredos)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --source . --no-banner --redact --exit-code 1
+        env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }} # opcional
   # -----------------------------
   # Java: FindSecBugs (SpotBugs)
   # -----------------------------
