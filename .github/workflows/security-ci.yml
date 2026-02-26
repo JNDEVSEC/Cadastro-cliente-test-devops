@@ -13,7 +13,7 @@ concurrency:
 
 permissions:
   contents: read
-  security-events: write  # necessário p/ upload SARIF (Semgrep/Trivy)
+  security-events: write  # necessário para upload SARIF (Semgrep/Trivy)
 
 jobs:
   detect_stacks:
@@ -69,8 +69,11 @@ jobs:
     if: ${{ needs.detect_stacks.outputs.has_node == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
@@ -113,11 +116,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
 
       - name: Instalar Semgrep (pinned)
         shell: bash
@@ -205,7 +210,8 @@ jobs:
     if: ${{ needs.detect_stacks.outputs.has_java == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Detectar diretório do POM
         id: pom
@@ -218,7 +224,9 @@ jobs:
 
       - name: Setup JDK
         uses: actions/setup-java@v4
-        with: { distribution: 'temurin', java-version: '21' }
+        with:
+          distribution: 'temurin'
+          java-version: '21'
 
       - name: Build + SpotBugs/FindSecBugs (gera relatórios)
         shell: bash
@@ -237,24 +245,11 @@ jobs:
           XML="target/spotbugsXml.xml"
           if [ -f "$XML" ]; then
             echo "=== SpotBugs (SECURITY) — resumo ==="
+            # P1=High, P2=Medium, P3=Low
             awk -F'[=\" ]+' '/<BugInstance/{p[$8]++}END{printf("P1(High): %d | P2(Medium): %d | P3(Low): %d\n",p[1]+0,p[2]+0,p[3]+0)}' "$XML"
-            echo "--- Top 20 findings ---"
-            python3 - <<'PY'
-import xml.etree.ElementTree as ET
-xml = ET.parse("target/spotbugsXml.xml").getroot()
-count = 0
-for b in xml.findall("BugInstance"):
-    p  = b.get("priority")
-    t  = b.get("type")
-    msg= b.get("message") or ""
-    loc = b.find("SourceLine")
-    if loc is not None:
-        cls = loc.get("classname","")
-        start = loc.get("start","")
-        print(f"[P{p}] {t} @ {cls}:{start} - {msg}")
-        count += 1
-        if count>=20: break
-PY
+            echo "Relatórios completos:"
+            echo " - XML : $(pwd)/target/spotbugsXml.xml"
+            echo " - HTML: $(pwd)/target/spotbugs.html"
           else
             echo "Nenhum spotbugsXml.xml encontrado."
           fi
@@ -283,7 +278,8 @@ PY
     name: "Trivy — SCA (repo) + Code Scanning"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Trivy FS scan (HIGH/CRITICAL) com SARIF e “gate”
         uses: aquasecurity/trivy-action@0.33.1
@@ -293,8 +289,8 @@ PY
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
-          exit-code: '1'                 # trava pipeline se houver achados nessas severidades
-          limit-severities-for-sarif: true  # SARIF só com severidades escolhidas
+          exit-code: '1'                   # trava pipeline se houver achados
+          limit-severities-for-sarif: true # SARIF só com as severidades escolhidas
 
       - name: Upload SARIF (Trivy)
         if: always()
