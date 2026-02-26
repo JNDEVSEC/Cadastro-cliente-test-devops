@@ -1,11 +1,11 @@
-name: "Security CI (Semgrep + ESLint + FindSecBugs + DepCheck)"
+name: "Security CI (Trivy + Semgrep + FindSecBugs + ESLint)"
 
 on:
   pull_request:
   push:
     branches: ["main"]
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "0 3 * * *"  # varredura noturna
 
 concurrency:
   group: "security-ci-${{ github.ref }}"
@@ -13,7 +13,7 @@ concurrency:
 
 permissions:
   contents: read
-  security-events: write
+  security-events: write  # necessário p/ upload SARIF (Semgrep/Trivy)
 
 jobs:
   detect_stacks:
@@ -22,6 +22,7 @@ jobs:
     outputs:
       has_java: ${{ steps.det.outputs.has_java }}
       has_node: ${{ steps.det.outputs.has_node }}
+      java_pom_dir: ${{ steps.det.outputs.java_pom_dir }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,12 +34,16 @@ jobs:
           set -euo pipefail
           has_java=false
           has_node=false
+          pom_dir=""
 
-          # Detect Java (pom.xml ou Gradle)
+          # Java: se existir qualquer pom.xml/gradle
           if git ls-files | grep -E '(^|/)(pom\.xml|build\.gradle(\.kts)?)$' -q; then
             has_java=true
+            P=$(git ls-files | grep "pom.xml" | head -n1 || true)
+            if [ -n "$P" ]; then pom_dir="$(dirname "$P")"; fi
           fi
-          # Detect Node
+
+          # Node
           if [ -f package.json ]; then
             has_node=true
           fi
@@ -46,12 +51,14 @@ jobs:
           {
             echo "has_java=$has_java"
             echo "has_node=$has_node"
+            echo "java_pom_dir=$pom_dir"
           } >> "$GITHUB_OUTPUT"
 
       - name: Exibir detecção
         run: |
           echo "Java: ${{ steps.det.outputs.has_java }}"
           echo "Node: ${{ steps.det.outputs.has_node }}"
+          echo "Pasta do POM: ${{ steps.det.outputs.java_pom_dir }}"
 
   # -----------------------------
   # ESLint (Node)
@@ -62,11 +69,8 @@ jobs:
     if: ${{ needs.detect_stacks.outputs.has_node == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
@@ -78,7 +82,7 @@ jobs:
           npm ci || npm i
           npm i -D eslint @eslint/js eslint-plugin-security @microsoft/eslint-plugin-sdl
 
-      - name: Criar .eslintrc.json mínimo (sem here-doc)
+      - name: Criar .eslintrc.json mínimo
         shell: bash
         run: |
           set -euo pipefail
@@ -100,7 +104,7 @@ jobs:
         run: npx eslint . --max-warnings=0
 
   # -----------------------------
-  # Semgrep (Java + Node)
+  # Semgrep (Java + Node) — SAST
   # -----------------------------
   semgrep:
     name: "Semgrep — SAST (Java/Node)"
@@ -109,21 +113,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
       - name: Setup Python
         uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
 
-      - name: Instalar Semgrep
+      - name: Instalar Semgrep (pinned)
         shell: bash
         run: |
           set -euo pipefail
-          pip install --upgrade semgrep
+          pip install --upgrade "semgrep==1.152.0"
 
-      - name: Ignorar arquivos que quebram o Semgrep
+      - name: Ignorar YAMLs problemáticos
         shell: bash
         run: |
           set -euo pipefail
@@ -144,7 +146,7 @@ jobs:
           IFS=, eval 'csv="${cfg[*]}"'
           echo "csv=$csv" >> "$GITHUB_OUTPUT"
 
-      - name: Semgrep (PR)
+      - name: Semgrep (PR — diff aware)
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash
         run: |
@@ -153,7 +155,7 @@ jobs:
           args=(); for c in "${arr[@]}"; do args+=( "--config=$c" ); done
           echo "=== Semgrep version ==="; semgrep --version || true
           semgrep ci "${args[@]}" \
-            --timeout 180 --strict --verbose \
+            --timeout 300 --strict --verbose \
             --sarif --output semgrep.sarif \
             --metrics=off --error . \
             1> semgrep_stdout.log \
@@ -166,8 +168,9 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
+          category: semgrep-pr
 
-      - name: Semgrep full scan
+      - name: Semgrep full scan (push/schedule)
         if: ${{ github.event_name != 'pull_request' }}
         shell: bash
         run: |
@@ -176,7 +179,7 @@ jobs:
           args=(); for c in "${arr[@]}"; do args+=( "--config=$c" ); done
           echo "=== Semgrep version ==="; semgrep --version || true
           semgrep scan "${args[@]}" \
-            --timeout 180 --strict --verbose \
+            --timeout 300 --strict --verbose \
             --sarif --output semgrep.sarif \
             --metrics=off --error . \
             1> semgrep_stdout.log \
@@ -194,50 +197,74 @@ jobs:
             semgrep_stderr.log
 
   # -----------------------------
-  # Java: FindSecBugs (SpotBugs)
+  # FindSecBugs (Java SAST) — bloqueante
   # -----------------------------
   findsecbugs:
-    name: "FindSecBugs (Java SAST)"
+    name: "FindSecBugs (Java — bloqueia se houver SECURITY)"
     needs: detect_stacks
     if: ${{ needs.detect_stacks.outputs.has_java == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Detectar diretório do pom.xml
+      - name: Detectar diretório do POM
         id: pom
         shell: bash
         run: |
           set -euo pipefail
           P=$(git ls-files | grep "pom.xml" | head -n1 || true)
-          if [ -z "$P" ]; then
-            echo "Nenhum pom.xml encontrado!"
-            exit 1
-          fi
+          if [ -z "$P" ]; then echo "Nenhum pom.xml encontrado!"; exit 1; fi
           echo "dir=$(dirname "$P")" >> "$GITHUB_OUTPUT"
 
       - name: Setup JDK
         uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '21'
+        with: { distribution: 'temurin', java-version: '21' }
 
-      - name: Cache Maven
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository
-          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-
-      - name: Rodar SpotBugs + FindSecBugs
+      - name: Build + SpotBugs/FindSecBugs (gera relatórios)
         shell: bash
         run: |
           set -euo pipefail
           cd "${{ steps.pom.outputs.dir }}"
           mvn -q -e -DskipTests package
-          mvn -q com.github.spotbugs:spotbugs-maven-plugin:4.8.6.2:spotbugs \
-            -Dspotbugs.effort=max \
-            -Dspotbugs.threshold=Low
+          mvn -q spotbugs:spotbugs
+
+      - name: Sumário de vulnerabilidades no console
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.pom.outputs.dir }}"
+          XML="target/spotbugsXml.xml"
+          if [ -f "$XML" ]; then
+            echo "=== SpotBugs (SECURITY) — resumo ==="
+            awk -F'[=\" ]+' '/<BugInstance/{p[$8]++}END{printf("P1(High): %d | P2(Medium): %d | P3(Low): %d\n",p[1]+0,p[2]+0,p[3]+0)}' "$XML"
+            echo "--- Top 20 findings ---"
+            python3 - <<'PY'
+import xml.etree.ElementTree as ET
+xml = ET.parse("target/spotbugsXml.xml").getroot()
+count = 0
+for b in xml.findall("BugInstance"):
+    p  = b.get("priority")
+    t  = b.get("type")
+    msg= b.get("message") or ""
+    loc = b.find("SourceLine")
+    if loc is not None:
+        cls = loc.get("classname","")
+        start = loc.get("start","")
+        print(f"[P{p}] {t} @ {cls}:{start} - {msg}")
+        count += 1
+        if count>=20: break
+PY
+          else
+            echo "Nenhum spotbugsXml.xml encontrado."
+          fi
+
+      - name: Enforçar falha por segurança (spotbugs:check)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.pom.outputs.dir }}"
+          mvn -q spotbugs:check
 
       - name: Upload relatórios SpotBugs
         if: always()
@@ -245,54 +272,33 @@ jobs:
         with:
           name: spotbugs-report
           path: |
-            **/target/spotbugsXml.xml
-            **/target/spotbugs.html
+            ${{ steps.pom.outputs.dir }}/target/spotbugsXml.xml
+            ${{ steps.pom.outputs.dir }}/target/spotbugs.html
+          if-no-files-found: warn
 
   # -----------------------------
-  # Java: OWASP Dependency-Check
+  # TRIVY — SCA rápida (repo inteiro)
   # -----------------------------
-  dependency_check_java:
-    name: "OWASP Dependency-Check (Java)"
-    needs: detect_stacks
-    if: ${{ needs.detect_stacks.outputs.has_java == 'true' }}
+  trivy_sca:
+    name: "Trivy — SCA (repo) + Code Scanning"
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Detectar diretório do pom.xml
-        id: pom
-        shell: bash
-        run: |
-          set -euo pipefail
-          P=$(git ls-files | grep "pom.xml" | head -n1 || true)
-          if [ -z "$P" ]; then
-            echo "Nenhum pom.xml encontrado!"
-            exit 1
-          fi
-          echo "dir=$(dirname "$P")" >> "$GITHUB_OUTPUT"
-
-      - name: Cache ODC
-        uses: actions/cache@v4
+      - name: Trivy FS scan (HIGH/CRITICAL) com SARIF e “gate”
+        uses: aquasecurity/trivy-action@0.33.1
         with:
-          path: ~/.m2/repository/org/owasp/dependency-check-data
-          key: odc-cache
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'                 # trava pipeline se houver achados nessas severidades
+          limit-severities-for-sarif: true  # SARIF só com severidades escolhidas
 
-      - name: Rodar Dependency-Check
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${{ steps.pom.outputs.dir }}"
-          mvn -q org.owasp:dependency-check-maven:10.0.3:check \
-            -Dformat=ALL \
-            -DfailBuildOnCVSS=9.0
-
-      - name: Upload relatórios ODC
+      - name: Upload SARIF (Trivy)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          name: dependency-check-report
-          path: |
-            **/dependency-check-report.html
-            **/dependency-check-report.json
-            **/dependency-check-report.xml
+          sarif_file: trivy-results.sarif
+          category: trivy-sca
