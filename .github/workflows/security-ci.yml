@@ -170,7 +170,7 @@ jobs:
 
       - name: Upload SARIF (PR)
         if: ${{ github.event_name == 'pull_request' }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: semgrep.sarif
           category: semgrep-pr
@@ -274,46 +274,43 @@ jobs:
   # -----------------------------
   # TRIVY — SCA rápida (repo inteiro)
   # -----------------------------
- trivy_sca:
-  name: "Trivy — SCA (repo) + Code Scanning"
-  runs-on: ubuntu-latest
-  steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+  trivy_sca:
+    name: "Trivy — SCA (repo) + Code Scanning"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    # Cache do DB do Trivy (acelera runs subsequentes)
-    - name: Cache Trivy DB
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cache/trivy/db
-          ~/.cache/trivy/java-db
-        key: cache-trivy-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml') }}
-        restore-keys: |
-          cache-trivy-${{ runner.os }}-
+      # Cache do DB do Trivy (acelera runs subsequentes)
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/trivy/db
+            ~/.cache/trivy/java-db
+          key: cache-trivy-${{ runner.os }}-${{ hashFiles('**/pom.xml', '**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml') }}
+          restore-keys: |
+            cache-trivy-${{ runner.os }}-
 
-    # Scan de filesystem, só vulnerabilidades (sem secrets), SARIF e gate
-    - name: Trivy FS scan (HIGH/CRITICAL) rápido + SARIF + gate
-    # action oficial: suporta scan-type, scan-ref, format sarif, output, exit-code, severity, scanners, limit-severities-for-sarif
-      uses: aquasecurity/trivy-action@0.33.1
-      with:
-        scan-type: fs
-        scan-ref: .
-        format: sarif
-        output: trivy-results.sarif
-        severity: CRITICAL,HIGH
-        scanners: vuln                 # ← desabilita secret/misconfig p/ acelerar
-        exit-code: '0'                 # ← trava se houver HIGH/CRITICAL
-        limit-severities-for-sarif: true
-        ignore-unfixed: true           # opcional: ignora CVEs sem fix disponível
-        # flags extras do CLI:
-        trivy-config: ""
-      env:
-        TRIVY_SKIP_VERSION_CHECK: "true"  # ← evita aviso/latência do version check
+      # Scan de filesystem: apenas vulnerabilidades (sem secrets), SARIF e gate
+      - name: Trivy FS scan (HIGH/CRITICAL) rápido + SARIF + gate
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: '1'
+          limit-severities-for-sarif: true
+        env:
+          TRIVY_SKIP_VERSION_CHECK: "true"
 
-    - name: Upload SARIF (Trivy)
-      if: always()
-      uses: github/codeql-action/upload-sarif@v4
-      with:
-        sarif_file: trivy-results.sarif
-        category: trivy-sca
+      - name: Upload SARIF (Trivy)
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-sca
