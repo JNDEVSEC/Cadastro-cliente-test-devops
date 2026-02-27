@@ -4,35 +4,72 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
-    # The branches below must be a subset of the branches above
     branches: [ "main" ]
   schedule:
     - cron: '16 14 * * 2'
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
   semgrep:
-    permissions:
-      contents: read # for actions/checkout to fetch code
-      security-events: write # for github/codeql-action/upload-sarif to upload SARIF results
-      actions: read # only required for a private repository by github/codeql-action/upload-sarif to get the Action run status
     name: Scan
     runs-on: ubuntu-latest
+
     steps:
-      # Checkout project source
       - uses: actions/checkout@v4
 
-      # Scan code using project's configuration on https://semgrep.dev/manage
-      - uses: returntocorp/semgrep-action@fcd5ab7459e8d91cb1777481980d1b18b4fc6735
-        with:
-          publishToken: ${{ secrets.SEMGREP_APP_TOKEN }}
-          generateSarif: "1"
+      # Instala Semgrep
+      - name: Install Semgrep
+        run: pip install semgrep
 
-      # Upload SARIF file generated in previous step
-      - name: Upload SARIF file
+      # Executa scan gerando JSON + SARIF
+      - name: Run Semgrep
+        run: |
+          semgrep scan \
+            --config auto \
+            --json --output semgrep.json \
+            --sarif --output semgrep.sarif
+
+      # Converter JSON para CSV
+      - name: Convert JSON to CSV
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          jq -r '
+            ["Rule ID","Severity","File","Line","Message"],
+            (.results[]? | [
+              .check_id,
+              .extra.severity,
+              .path,
+              .start.line,
+              .extra.message
+            ])
+            | @csv' semgrep.json > semgrep.csv
+
+      # Converter CSV para Excel (XLSX)
+      - name: Convert CSV to XLSX
+        run: |
+          pip install pandas openpyxl
+          python <<EOF
+          import pandas as pd
+          df = pd.read_csv("semgrep.csv")
+          df.to_excel("semgrep.xlsx", index=False)
+          EOF
+
+      # Upload SARIF para Code Scanning
+      - name: Upload SARIF
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: semgrep.sarif
-        if: always()
+
+      # Upload dos relatórios como artifact
+      - name: Upload Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: |
+            semgrep.json
+            semgrep.csv
+            semgrep.xlsx
