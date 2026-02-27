@@ -6,7 +6,8 @@ on:
   pull_request:
     branches: ["main"]
   schedule:
-    - cron: '16 14 * * 2'
+    - cron: '16 14 * * 2'  # Terças 14:16 UTC
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -92,3 +93,4 @@ EOF
             semgrep.xlsx
             semgrep.sarif
             trivy-results.sarif
+``
