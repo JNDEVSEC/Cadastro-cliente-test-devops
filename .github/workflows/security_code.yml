@@ -26,7 +26,7 @@ jobs:
       # Instalar dependências
       # -----------------------------
       - name: Install dependencies
-        run: pip install semgrep jq pandas openpyxl
+        run: pip install semgrep jq
 
       # -----------------------------
       # Semgrep scan JSON + SARIF
@@ -37,7 +37,10 @@ jobs:
       - name: Run Semgrep (SARIF)
         run: semgrep scan --config auto --sarif --output semgrep.sarif || true
 
-      - name: Convert JSON to CSV
+      # -----------------------------
+      # Semgrep: gerar CSV (via jq) e JSON achatado
+      # -----------------------------
+      - name: Convert JSON to CSV (via jq)
         run: |
           jq -r '
             ["Rule ID","Severity","File","Line","Message"],
@@ -47,16 +50,22 @@ jobs:
               .path,
               .start.line,
               .extra.message
-            ])
-            | @csv' semgrep.json > semgrep.csv
+            ]) | @csv
+          ' semgrep.json > semgrep.csv
 
-      - name: Convert CSV to XLSX
+      - name: Build flat JSON report from Semgrep
         run: |
-          python <<'EOF'
-import pandas as pd
-df = pd.read_csv("semgrep.csv")
-df.to_excel("semgrep.xlsx", index=False)
-EOF
+          jq '{
+            results: [
+              .results[]? | {
+                rule_id: .check_id,
+                severity: .extra.severity,
+                file: .path,
+                line: .start.line,
+                message: .extra.message
+              }
+            ]
+          }' semgrep.json > semgrep.report.json
 
       - name: Upload Semgrep SARIF
         uses: github/codeql-action/upload-sarif@v4
@@ -90,6 +99,6 @@ EOF
           path: |
             semgrep.json
             semgrep.csv
-            semgrep.xlsx
+            semgrep.report.json
             semgrep.sarif
             trivy-results.sarif
