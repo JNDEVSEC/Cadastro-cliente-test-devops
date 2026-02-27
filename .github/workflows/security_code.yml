@@ -2,9 +2,9 @@ name: Security Scan
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
   schedule:
     - cron: '16 14 * * 2'
 
@@ -22,13 +22,13 @@ jobs:
         uses: actions/checkout@v4
 
       # -----------------------------
-      # Instala dependências
+      # Instalar dependências
       # -----------------------------
       - name: Install dependencies
         run: pip install semgrep jq pandas openpyxl
 
       # -----------------------------
-      # Semgrep scan JSON e SARIF
+      # Semgrep scan JSON + SARIF
       # -----------------------------
       - name: Run Semgrep (JSON)
         run: semgrep scan --config auto --json --output semgrep.json || true
@@ -73,43 +73,41 @@ EOF
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
 
+      - name: Upload Trivy SARIF (filesystem)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+
       # -----------------------------
-      # Trivy scan Docker (só se houver Dockerfile)
+      # Trivy scan Docker (se houver Dockerfile)
       # -----------------------------
-      - name: Check for Dockerfile and scan image
+      - name: Run Trivy Docker scan
+        id: docker_scan
         if: ${{ always() }}
         run: |
           if [ -f Dockerfile ]; then
-            echo "Dockerfile found → running Trivy Docker image scan"
-            docker build -t my-app-image:${GITHUB_SHA} .
+            echo "Dockerfile found → scanning Docker image locally"
+            docker build -t local-app:${GITHUB_SHA} .
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasecurity/trivy-action:0.20.0 \
-              image-ref=my-app-image:${GITHUB_SHA} \
+              image-ref=local-app:${GITHUB_SHA} \
               format=template \
               template=@/contrib/sarif.tpl \
               output=trivy-results-image.sarif \
               severity=CRITICAL,HIGH
           else
-            echo "No Dockerfile found → skipping Docker image scan"
+            echo "No Dockerfile → skipping Docker image scan"
           fi
 
-      # -----------------------------
-      # Upload Trivy SARIF
-      # -----------------------------
-      - name: Upload Trivy SARIF (filesystem)
+      - name: Upload Trivy SARIF (Docker image)
+        if: ${{ always() && steps.docker_scan.outcome == 'success' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: 'trivy-results.sarif'
-
-      - name: Upload Trivy SARIF (Docker image, if exists)
-        if: ${{ steps.check-for-dockerfile-and-scan-image.outcome == 'success' &&  (steps.check-for-dockerfile-and-scan-image.conclusion != 'skipped') }}
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: 'trivy-results-image.sarif'
+          sarif_file: trivy-results-image.sarif
 
       # -----------------------------
-      # Upload de todos os relatórios como artifact
+      # Upload todos os relatórios como artifact
       # -----------------------------
-      - name: Upload Reports
+      - name: Upload all reports
         uses: actions/upload-artifact@v4
         with:
           name: security-reports
