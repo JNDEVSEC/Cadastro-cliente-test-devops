@@ -93,4 +93,3 @@ EOF
             semgrep.xlsx
             semgrep.sarif
             trivy-results.sarif
-``
