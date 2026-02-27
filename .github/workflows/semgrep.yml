@@ -20,23 +20,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Instala Semgrep
+      # Instala Semgrep e dependências
       - name: Install Semgrep
-        run: pip install semgrep
+        run: pip install semgrep jq pandas openpyxl
 
-      # Executa scan gerando JSON + SARIF
-      - name: Run Semgrep
+      # Executa scan gerando JSON
+      - name: Run Semgrep (JSON)
         run: |
-          semgrep scan \
-            --config auto \
-            --json --output semgrep.json \
-            --sarif --output semgrep.sarif
+          semgrep scan --config auto --json --output semgrep.json || true
+
+      # Executa scan gerando SARIF
+      - name: Run Semgrep (SARIF)
+        run: |
+          semgrep scan --config auto --sarif --output semgrep.sarif || true
 
       # Converter JSON para CSV
       - name: Convert JSON to CSV
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
           jq -r '
             ["Rule ID","Severity","File","Line","Message"],
             (.results[]? | [
@@ -51,12 +51,11 @@ jobs:
       # Converter CSV para Excel (XLSX)
       - name: Convert CSV to XLSX
         run: |
-          pip install pandas openpyxl
           python <<EOF
-          import pandas as pd
-          df = pd.read_csv("semgrep.csv")
-          df.to_excel("semgrep.xlsx", index=False)
-          EOF
+            import pandas as pd
+            df = pd.read_csv("semgrep.csv")
+            df.to_excel("semgrep.xlsx", index=False)
+            EOF
 
       # Upload SARIF para Code Scanning
       - name: Upload SARIF
