@@ -49,10 +49,9 @@ jobs:
             ])
             | @csv' semgrep.json > semgrep.csv
 
-      
-        - name: Convert CSV to XLSX
-          run: |
-            python <<'EOF'
+      - name: Convert CSV to XLSX
+        run: |
+          python <<'EOF'
 import pandas as pd
 df = pd.read_csv("semgrep.csv")
 df.to_excel("semgrep.xlsx", index=False)
@@ -70,6 +69,7 @@ EOF
         uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: 'fs'
+          scan-ref: '.'
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
