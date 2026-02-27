@@ -24,7 +24,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install semgrep reportlab jq
+          pip install semgrep reportlab pypdf2 jq
 
       # SEMGREP
       - name: Run Semgrep (JSON)
