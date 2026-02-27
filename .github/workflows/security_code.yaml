@@ -22,15 +22,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # -----------------------------
-      # Instalar dependências
-      # -----------------------------
+      # Dependências (sem Python extra além de reportlab)
       - name: Install dependencies
         run: |
           pip install semgrep reportlab
 
       # -----------------------------
-      # Semgrep scan JSON + SARIF
+      # Semgrep
       # -----------------------------
       - name: Run Semgrep (JSON)
         run: semgrep scan --config auto --json --output semgrep.json || true
@@ -38,9 +36,6 @@ jobs:
       - name: Run Semgrep (SARIF)
         run: semgrep scan --config auto --sarif --output semgrep.sarif || true
 
-      # -----------------------------
-      # Semgrep: CSV (via jq) + JSON achatado
-      # -----------------------------
       - name: Convert JSON to CSV (via jq)
         run: |
           jq -r '
@@ -74,286 +69,279 @@ jobs:
           sarif_file: semgrep.sarif
 
       # -----------------------------
-      # Trivy scan filesystem (JSON)
+      # Trivy (filesystem → JSON)
       # -----------------------------
       - name: Run Trivy (filesystem, JSON)
         uses: aquasecurity/trivy-action@0.33.1
         with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'json'
-          output: 'trivy-results.json'
-          severity: 'CRITICAL,HIGH'
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: trivy-results.json
+          severity: CRITICAL,HIGH
 
       # -----------------------------
-      # Criar script do PDF corporativo (sem indentação no corpo!)
+      # Gerar PDF corporativo (sem HTML entities e sem IndentationError)
       # -----------------------------
-      - name: Write generate_report.py
+      - name: Write generate_report.py (dedent 8 spaces)
+        shell: bash
         run: |
-          cat > generate_report.py <<'PY'
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib import colors
-from reportlab.lib.units import mm
-from datetime import datetime
-import json
-import os
+          # Grava o script com 8 espaços à esquerda (para agradar o YAML) e remove esses 8 espaços por linha antes de salvar.
+          sed -e 's/^[[:space:]]\{8\}//' > generate_report.py <<'PY'
+                from reportlab.lib.pagesizes import A4
+                from reportlab.pdfgen import canvas
+                from reportlab.lib import colors
+                from reportlab.lib.units import mm
+                from datetime import datetime
+                import json
+                import os
 
-# ---------- Configurações genéricas ----------
-ORG_NAME = "Sua Empresa"
-TITLE = "Relatório de Segurança - Semgrep & Trivy"
-DATE_STR = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+                # ---------- Configurações genéricas ----------
+                ORG_NAME = "Sua Empresa"
+                TITLE = "Relatório de Segurança - Semgrep & Trivy"
+                DATE_STR = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
 
-SEV_COLORS = {
-    "CRITICAL": colors.Color(0.85, 0.10, 0.10),   # vermelho
-    "HIGH":     colors.Color(0.95, 0.45, 0.00),   # laranja
-    "MEDIUM":   colors.Color(0.95, 0.75, 0.00),   # amarelo
-    "LOW":      colors.Color(0.30, 0.70, 0.30),   # verde
-    "UNKNOWN":  colors.Color(0.50, 0.50, 0.50),   # cinza
-}
-SEV_ORDER = ["CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN"]
+                SEV_COLORS = {
+                    "CRITICAL": colors.Color(0.85, 0.10, 0.10),   # vermelho
+                    "HIGH":     colors.Color(0.95, 0.45, 0.00),   # laranja
+                    "MEDIUM":   colors.Color(0.95, 0.75, 0.00),   # amarelo
+                    "LOW":      colors.Color(0.30, 0.70, 0.30),   # verde
+                    "UNKNOWN":  colors.Color(0.50, 0.50, 0.50),   # cinza
+                }
+                SEV_ORDER = ["CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN"]
 
-PAGE_W, PAGE_H = A4
-MARGIN_L = 20*mm
-MARGIN_R = 20*mm
-MARGIN_T = 20*mm
-MARGIN_B = 15*mm
-CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
+                PAGE_W, PAGE_H = A4
+                MARGIN_L = 20*mm
+                MARGIN_R = 20*mm
+                MARGIN_T = 20*mm
+                MARGIN_B = 15*mm
+                CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
 
-def wrap_text(c, text, max_width):
-    words = text.split()
-    lines, line = [], ""
-    for w in words:
-        test = f"{line} {w}".strip()
-        if c.stringWidth(test, "Helvetica", 11) <= max_width:
-            line = test
-        else:
-            if line:
-                lines.append(line)
-            line = w
-    if line:
-        lines.append(line)
-    return lines
+                def wrap_text(c, text, max_width):
+                    words = text.split()
+                    lines, line = [], ""
+                    for w in words:
+                        test = f"{line} {w}".strip()
+                        if c.stringWidth(test, "Helvetica", 11) <= max_width:
+                            line = test
+                        else:
+                            if line:
+                                lines.append(line)
+                            line = w
+                    if line:
+                        lines.append(line)
+                    return lines
 
-def draw_header_footer(c):
-    page_num = c.getPageNumber()
-    footer = f"Página {page_num}"
-    c.setFont("Helvetica", 9)
-    c.setFillColor(colors.grey)
-    c.drawRightString(PAGE_W - MARGIN_R, MARGIN_B - 5, footer)
-    c.setFillColor(colors.black)
+                def draw_header_footer(c):
+                    page_num = c.getPageNumber()
+                    footer = f"Página {page_num}"
+                    c.setFont("Helvetica", 9)
+                    c.setFillColor(colors.grey)
+                    c.drawRightString(PAGE_W - MARGIN_R, MARGIN_B - 5, footer)
+                    c.setFillColor(colors.black)
 
-def cover_page(c):
-    c.setFillColor(colors.HexColor("#0f172a"))
-    c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
-    c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 24)
-    c.drawString(MARGIN_L, PAGE_H - 60*mm, TITLE)
-    c.setFont("Helvetica", 14)
-    c.drawString(MARGIN_L, PAGE_H - 75*mm, f"Organização: {ORG_NAME}")
-    c.setFont("Helvetica", 12)
-    c.drawString(MARGIN_L, PAGE_H - 90*mm, f"Data: {DATE_STR}")
-    c.setFillColor(colors.HexColor("#22c55e"))
-    c.rect(0, 0, PAGE_W, 10*mm, stroke=0, fill=1)
-    c.showPage()
+                def cover_page(c):
+                    c.setFillColor(colors.HexColor("#0f172a"))
+                    c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
+                    c.setFillColor(colors.white)
+                    c.setFont("Helvetica-Bold", 24)
+                    c.drawString(MARGIN_L, PAGE_H - 60*mm, TITLE)
+                    c.setFont("Helvetica", 14)
+                    c.drawString(MARGIN_L, PAGE_H - 75*mm, f"Organização: {ORG_NAME}")
+                    c.setFont("Helvetica", 12)
+                    c.drawString(MARGIN_L, PAGE_H - 90*mm, f"Data: {DATE_STR}")
+                    c.setFillColor(colors.HexColor("#22c55e"))
+                    c.rect(0, 0, PAGE_W, 10*mm, stroke=0, fill=1)
+                    c.showPage()
 
-def count_by_severity(items, key="severity"):
-    counts = {s:0 for s in SEV_ORDER}
-    for it in items:
-        sev = (it.get(key) or "UNKNOWN").upper()
-        if sev not in counts:
-            sev = "UNKNOWN"
-        counts[sev] += 1
-    return counts
+                def count_by_severity(items, key="severity"):
+                    counts = {s:0 for s in SEV_ORDER}
+                    for it in items:
+                        sev = (it.get(key) or "UNKNOWN").upper()
+                        if sev not in counts:
+                            sev = "UNKNOWN"
+                        counts[sev] += 1
+                    return counts
 
-def paint_severity_badge(c, x, y, text):
-    color = SEV_COLORS.get(text, colors.grey)
-    c.setFillColor(color)
-    c.roundRect(x, y-10, 60, 16, 3, stroke=0, fill=1)
-    c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(x+6, y-2, text)
-    c.setFillColor(colors.black)
+                def paint_severity_badge(c, x, y, text):
+                    color = SEV_COLORS.get(text, colors.grey)
+                    c.setFillColor(color)
+                    c.roundRect(x, y-10, 60, 16, 3, stroke=0, fill=1)
+                    c.setFillColor(colors.white)
+                    c.setFont("Helvetica-Bold", 10)
+                    c.drawString(x+6, y-2, text)
+                    c.setFillColor(colors.black)
 
-def draw_summary_cards(c, x, y, title, counts):
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(x, y, title)
-    y -= 10
-    c.setLineWidth(0.7)
-    c.setStrokeColor(colors.HexColor("#e5e7eb"))
-    c.line(x, y, x+CONTENT_W, y)
-    y -= 12
-    card_w = (CONTENT_W - 20) / 3
-    card_h = 28
-    columns = [
-        ("CRITICAL/HIGH", counts.get("CRITICAL",0)+counts.get("HIGH",0), colors.HexColor("#fee2e2")),
-        ("MEDIUM", counts.get("MEDIUM",0), colors.HexColor("#fef3c7")),
-        ("LOW/UNKNOWN", counts.get("LOW",0)+counts.get("UNKNOWN",0), colors.HexColor("#e5e7eb")),
-    ]
-    cx = x
-    for label, value, bg in columns:
-        c.setFillColor(bg)
-        c.roundRect(cx, y-card_h, card_w, card_h, 4, stroke=0, fill=1)
-        c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(cx+8, y-10, f"{label}: {value}")
-        cx += card_w + 10
-    return y - card_h - 14
+                def draw_summary_cards(c, x, y, title, counts):
+                    c.setFont("Helvetica-Bold", 16)
+                    c.drawString(x, y, title)
+                    y -= 10
+                    c.setLineWidth(0.7)
+                    c.setStrokeColor(colors.HexColor("#e5e7eb"))
+                    c.line(x, y, x+CONTENT_W, y)
+                    y -= 12
+                    card_w = (CONTENT_W - 20) / 3
+                    card_h = 28
+                    columns = [
+                        ("CRITICAL/HIGH", counts.get("CRITICAL",0)+counts.get("HIGH",0), colors.HexColor("#fee2e2")),
+                        ("MEDIUM", counts.get("MEDIUM",0), colors.HexColor("#fef3c7")),
+                        ("LOW/UNKNOWN", counts.get("LOW",0)+counts.get("UNKNOWN",0), colors.HexColor("#e5e7eb")),
+                    ]
+                    cx = x
+                    for label, value, bg in columns:
+                        c.setFillColor(bg)
+                        c.roundRect(cx, y-card_h, card_w, card_h, 4, stroke=0, fill=1)
+                        c.setFillColor(colors.black)
+                        c.setFont("Helvetica-Bold", 12)
+                        c.drawString(cx+8, y-10, f"{label}: {value}")
+                        cx += card_w + 10
+                    return y - card_h - 14
 
-def draw_semgrep_section(c, semgrep):
-    x = MARGIN_L
-    y = PAGE_H - MARGIN_T
-    c.setFont("Helvetica-Bold", 18)
-    c.drawString(x, y, "Seção A — Semgrep")
-    y -= 18
-    counts = count_by_severity(semgrep, key="severity")
-    y = draw_summary_cards(c, x, y, "Resumo Semgrep", counts)
-    y -= 8
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(x, y, "Achados (máx. 150 linhas)")
-    y -= 16
-    c.setFont("Helvetica", 11)
-    printed = 0
-    order = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"UNKNOWN":4}
-    for it in sorted(semgrep, key=lambda k: order.get((k.get("severity") or "UNKNOWN").upper(), 4)):
-        if printed >= 150: break
-        sev = (it.get("severity") or "UNKNOWN").upper()
-        file_line = f"{it.get('file','')}: {it.get('line','')}"
-        msg = it.get("message","")
-        paint_severity_badge(c, x, y, sev)
-        maxw = CONTENT_W - 70
-        lines = wrap_text(c, f"{file_line} — {msg}", maxw)
-        c.drawString(x+70, y-2, lines[0])
-        y -= 16
-        for ln in lines[1:]:
-            c.drawString(x+70, y-2, ln)
-            y -= 16
-        printed += 1
-        if y < MARGIN_B + 40:
-            draw_header_footer(c)
-            c.showPage()
-            y = PAGE_H - MARGIN_T
-            c.setFont("Helvetica", 11)
-    draw_header_footer(c)
-    c.showPage()
+                def draw_semgrep_section(c, semgrep):
+                    x = MARGIN_L
+                    y = PAGE_H - MARGIN_T
+                    c.setFont("Helvetica-Bold", 18)
+                    c.drawString(x, y, "Seção A — Semgrep")
+                    y -= 18
+                    counts = count_by_severity(semgrep, key="severity")
+                    y = draw_summary_cards(c, x, y, "Resumo Semgrep", counts)
+                    y -= 8
+                    c.setFont("Helvetica-Bold", 14)
+                    c.drawString(x, y, "Achados (máx. 150 linhas)")
+                    y -= 16
+                    c.setFont("Helvetica", 11)
+                    printed = 0
+                    order = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"UNKNOWN":4}
+                    for it in sorted(semgrep, key=lambda k: order.get((k.get("severity") or "UNKNOWN").upper(), 4)):
+                        if printed >= 150: break
+                        sev = (it.get("severity") or "UNKNOWN").upper()
+                        file_line = f"{it.get('file','')}: {it.get('line','')}"
+                        msg = it.get("message","")
+                        paint_severity_badge(c, x, y, sev)
+                        maxw = CONTENT_W - 70
+                        lines = wrap_text(c, f"{file_line} — {msg}", maxw)
+                        c.drawString(x+70, y-2, lines[0])
+                        y -= 16
+                        for ln in lines[1:]:
+                            c.drawString(x+70, y-2, ln)
+                            y -= 16
+                        printed += 1
+                        if y < MARGIN_B + 40:
+                            draw_header_footer(c)
+                            c.showPage()
+                            y = PAGE_H - MARGIN_T
+                            c.setFont("Helvetica", 11)
+                    draw_header_footer(c)
+                    c.showPage()
 
-def draw_trivy_section(c, trivy_results):
-    x = MARGIN_L
-    y = PAGE_H - MARGIN_T
-    c.setFont("Helvetica-Bold", 18)
-    c.drawString(x, y, "Seção B — Trivy (Vulnerabilities)")
-    y -= 18
-    flat = []
-    for res in trivy_results.get("Results", []) or []:
-        for v in res.get("Vulnerabilities", []) or []:
-            flat.append({
-                "Severity": v.get("Severity") or "UNKNOWN",
-                "VulnerabilityID": v.get("VulnerabilityID",""),
-                "PkgName": v.get("PkgName",""),
-                "InstalledVersion": v.get("InstalledVersion",""),
-                "FixedVersion": v.get("FixedVersion") or "-",
-            })
-    counts = {s:0 for s in SEV_ORDER}
-    for i in flat:
-        sev = (i.get("Severity") or "UNKNOWN").upper()
-        if sev not in counts: sev = "UNKNOWN"
-        counts[sev] += 1
-    y = draw_summary_cards(c, x, y, "Resumo Trivy", counts)
-    y -= 8
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(x, y, "Achados (máx. 200 linhas)")
-    y -= 16
-    c.setFont("Helvetica", 11)
-    def sev_key(s):
-        s = (s or "UNKNOWN").upper()
-        return SEV_ORDER.index(s) if s in SEV_ORDER else 4
-    printed = 0
-    for v in sorted(flat, key=lambda r: (sev_key(r.get("Severity")), r.get("VulnerabilityID",""))):
-        if printed >= 200: break
-        sev = (v.get("Severity") or "UNKNOWN").upper()
-        line = f"{v['VulnerabilityID']} — {v['PkgName']} ({v['InstalledVersion']} -> {v['FixedVersion']})"
-        paint_severity_badge(c, x, y, sev)
-        for ln in wrap_text(c, line, CONTENT_W - 70):
-            c.drawString(x+70, y-2, ln)
-            y -= 16
-            if y < MARGIN_B + 40:
-                draw_header_footer(c)
-                c.showPage()
-                y = PAGE_H - MARGIN_T
-                c.setFont("Helvetica", 11)
-        printed += 1
-    draw_header_footer(c)
-    c.showPage()
+                def draw_trivy_section(c, trivy_results):
+                    x = MARGIN_L
+                    y = PAGE_H - MARGIN_T
+                    c.setFont("Helvetica-Bold", 18)
+                    c.drawString(x, y, "Seção B — Trivy (Vulnerabilities)")
+                    y -= 18
+                    flat = []
+                    for res in trivy_results.get("Results", []) or []:
+                        for v in res.get("Vulnerabilities", []) or []:
+                            flat.append({
+                                "Severity": v.get("Severity") or "UNKNOWN",
+                                "VulnerabilityID": v.get("VulnerabilityID",""),
+                                "PkgName": v.get("PkgName",""),
+                                "InstalledVersion": v.get("InstalledVersion",""),
+                                "FixedVersion": v.get("FixedVersion") or "-",
+                            })
+                    counts = {s:0 for s in SEV_ORDER}
+                    for i in flat:
+                        sev = (i.get("Severity") or "UNKNOWN").upper()
+                        if sev not in counts: sev = "UNKNOWN"
+                        counts[sev] += 1
+                    y = draw_summary_cards(c, x, y, "Resumo Trivy", counts)
+                    y -= 8
+                    c.setFont("Helvetica-Bold", 14)
+                    c.drawString(x, y, "Achados (máx. 200 linhas)")
+                    y -= 16
+                    c.setFont("Helvetica", 11)
+                    def sev_key(s):
+                        s = (s or "UNKNOWN").upper()
+                        return SEV_ORDER.index(s) if s in SEV_ORDER else 4
+                    printed = 0
+                    for v in sorted(flat, key=lambda r: (sev_key(r.get("Severity")), r.get("VulnerabilityID",""))):
+                        if printed >= 200: break
+                        sev = (v.get("Severity") or "UNKNOWN").upper()
+                        line = f"{v['VulnerabilityID']} — {v['PkgName']} ({v['InstalledVersion']} -> {v['FixedVersion']})"
+                        paint_severity_badge(c, x, y, sev)
+                        for ln in wrap_text(c, line, CONTENT_W - 70):
+                            c.drawString(x+70, y-2, ln)
+                            y -= 16
+                            if y < MARGIN_B + 40:
+                                draw_header_footer(c)
+                                c.showPage()
+                                y = PAGE_H - MARGIN_T
+                                c.setFont("Helvetica", 11)
+                        printed += 1
+                    draw_header_footer(c)
+                    c.showPage()
 
-def main():
-    semgrep = []
-    if os.path.exists("semgrep.report.json"):
-        try:
-            with open("semgrep.report.json","r") as f:
-                data = json.load(f)
-                semgrep = data.get("results", [])
-        except Exception:
-            semgrep = []
-    trivy = {}
-    if os.path.exists("trivy-results.json"):
-        try:
-            with open("trivy-results.json","r") as f:
-                trivy = json.load(f)
-        except Exception:
-            trivy = {}
-    c = canvas.Canvas("security-report.pdf", pagesize=A4)
-    cover_page(c)
-    # Resumo executivo
-    x = MARGIN_L
-    y = PAGE_H - MARGIN_T
-    c.setFont("Helvetica-Bold", 20)
-    c.drawString(x, y, "Resumo Executivo")
-    y -= 22
-    c.setLineWidth(0.7)
-    c.setStrokeColor(colors.HexColor("#e5e7eb"))
-    c.line(x, y, x+CONTENT_W, y)
-    y -= 16
-    semgrep_counts = count_by_severity(semgrep, key="severity")
-    trivy_flat_counts = {s:0 for s in SEV_ORDER}
-    if trivy:
-        for res in trivy.get("Results", []) or []:
-            for v in res.get("Vulnerabilities", []) or []:
-                sev = (v.get("Severity") or "UNKNOWN").upper()
-                if sev not in trivy_flat_counts: sev = "UNKNOWN"
-                trivy_flat_counts[sev] += 1
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(x, y, "Semgrep")
-    y -= 14
-    y = draw_summary_cards(c, x, y, "Severidades (Semgrep)", semgrep_counts)
-    y -= 6
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(x, y, "Trivy")
-    y -= 14
-    y = draw_summary_cards(c, x, y, "Severidades (Trivy)", trivy_flat_counts)
-    draw_header_footer(c)
-    c.showPage()
-    # Seções
-    draw_semgrep_section(c, semgrep)
-    draw_trivy_section(c, trivy)
-    c.save()
+                def main():
+                    semgrep = []
+                    if os.path.exists("semgrep.report.json"):
+                        try:
+                            with open("semgrep.report.json","r") as f:
+                                data = json.load(f)
+                                semgrep = data.get("results", [])
+                        except Exception:
+                            semgrep = []
+                    trivy = {}
+                    if os.path.exists("trivy-results.json"):
+                        try:
+                            with open("trivy-results.json","r") as f:
+                                trivy = json.load(f)
+                        except Exception:
+                            trivy = {}
+                    c = canvas.Canvas("security-report.pdf", pagesize=A4)
+                    cover_page(c)
+                    # Resumo executivo
+                    x = MARGIN_L
+                    y = PAGE_H - MARGIN_T
+                    c.setFont("Helvetica-Bold", 20)
+                    c.drawString(x, y, "Resumo Executivo")
+                    y -= 22
+                    c.setLineWidth(0.7)
+                    c.setStrokeColor(colors.HexColor("#e5e7eb"))
+                    c.line(x, y, x+CONTENT_W, y)
+                    y -= 16
+                    semgrep_counts = count_by_severity(semgrep, key="severity")
+                    trivy_flat_counts = {s:0 for s in SEV_ORDER}
+                    if trivy:
+                        for res in trivy.get("Results", []) or []:
+                            for v in res.get("Vulnerabilities", []) or []:
+                                sev = (v.get("Severity") or "UNKNOWN").upper()
+                                if sev not in trivy_flat_counts: sev = "UNKNOWN"
+                                trivy_flat_counts[sev] += 1
+                    c.setFont("Helvetica-Bold", 14)
+                    c.drawString(x, y, "Semgrep")
+                    y -= 14
+                    y = draw_summary_cards(c, x, y, "Severidades (Semgrep)", semgrep_counts)
+                    y -= 6
+                    c.setFont("Helvetica-Bold", 14)
+                    c.drawString(x, y, "Trivy")
+                    y -= 14
+                    y = draw_summary_cards(c, x, y, "Severidades (Trivy)", trivy_flat_counts)
+                    draw_header_footer(c)
+                    c.showPage()
+                    # Seções detalhadas
+                    draw_semgrep_section(c, semgrep)
+                    draw_trivy_section(c, trivy)
+                    c.save()
 
-if __name__ == "__main__":
-    main()
-PY
-
-      # Normalizar o arquivo: remover BOM/CRLF e espaços na 1ª linha
-      - name: Normalize script file
-        run: |
-          sed -i '1s/^\xEF\xBB\xBF//' generate_report.py || true
-          sed -i 's/\r$//' generate_report.py || true
-          awk 'NR==1{sub(/^[ \t]+/,"")} {print}' generate_report.py > .tmp && mv .tmp generate_report.py
+                if __name__ == "__main__":
+                    main()
+          PY
 
       - name: Generate PDF Security Report
         run: python generate_report.py
 
-      # -----------------------------
-      # Listar (debug) e enviar artifacts
-      # -----------------------------
+      # Debug e Upload
       - name: List reports before upload
         if: always()
         run: |
