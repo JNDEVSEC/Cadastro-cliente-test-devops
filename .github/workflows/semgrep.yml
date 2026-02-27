@@ -18,18 +18,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      # Instala Semgrep e dependências
-      - name: Install Semgrep
+      # Instala Semgrep e dependências para CSV/XLSX
+      - name: Install dependencies
         run: pip install semgrep jq pandas openpyxl
 
-      # Executa scan gerando JSON
+      # Executa Semgrep gerando JSON
       - name: Run Semgrep (JSON)
         run: |
           semgrep scan --config auto --json --output semgrep.json || true
 
-      # Executa scan gerando SARIF
+      # Executa Semgrep gerando SARIF
       - name: Run Semgrep (SARIF)
         run: |
           semgrep scan --config auto --sarif --output semgrep.sarif || true
@@ -48,16 +49,16 @@ jobs:
             ])
             | @csv' semgrep.json > semgrep.csv
 
-      # Converter CSV para Excel (XLSX)
+      # Converter CSV para Excel (XLSX) sem erro de indentação
       - name: Convert CSV to XLSX
         run: |
           python <<EOF
-            import pandas as pd
-            df = pd.read_csv("semgrep.csv")
-            df.to_excel("semgrep.xlsx", index=False)
-            EOF
+import pandas as pd
+df = pd.read_csv("semgrep.csv")
+df.to_excel("semgrep.xlsx", index=False)
+EOF
 
-      # Upload SARIF para Code Scanning
+      # Upload SARIF para GitHub Security (Code Scanning)
       - name: Upload SARIF
         uses: github/codeql-action/upload-sarif@v4
         with:
