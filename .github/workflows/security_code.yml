@@ -94,6 +94,19 @@ jobs:
           ls -lah
           echo "---- head trivy-results.json ----"
           head -n 50 trivy-results.json || true
+     
+      - name: Install PDF libs
+        run: pip install reportlab
+
+      - name: Generate PDF Security Report
+        run: python generate_report.py
+
+      - name: Upload PDF report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: security-report.pdf
 
       # -----------------------------
       # Upload todos os relatórios como artifact
