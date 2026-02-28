@@ -21,10 +21,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
+      
       - name: Install dependencies
-        run: |
-          pip install semgrep reportlab pypdf2 jq
+        run: pip install semgrep reportlab pypdf2 jq
+
 
       # SEMGREP
       - name: Run Semgrep (JSON)
