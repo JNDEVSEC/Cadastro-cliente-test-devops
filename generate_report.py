@@ -229,13 +229,18 @@ def draw_footer(c):
 # GRÁFICOS (pizza + barras + heatmap)
 # =========================
 def draw_pie_with_values(c, counts, title, origin_x, origin_y):
+    """Desenha o gráfico de pizza com rótulos (valor e %) e título no canvas."""
     total = sum(counts.values()) or 1
-    d = Drawing(360, 230)
-    d.add(String(0, 210, title, fontName="Helvetica-Bold", fontSize=FONT_L, fillColor=colors.black))
 
+    # Título (no canvas) um pouco acima do desenho
+    c.setFont("Helvetica-Bold", FONT_L)
+    c.setFillColor(colors.black)
+    c.drawString(origin_x, origin_y + 230, title)
+
+    d = Drawing(360, 220)
     pie = Pie()
     pie.x = 26
-    pie.y = 16
+    pie.y = 10
     pie.width  = 205
     pie.height = 205
     pie.data   = [counts[s] for s in SEV_ORDER]
@@ -249,12 +254,15 @@ def draw_pie_with_values(c, counts, title, origin_x, origin_y):
     renderPDF.draw(d, c, origin_x, origin_y)
 
 def draw_bars_with_values(c, sem_counts, tri_counts, title, origin_x, origin_y):
-    d = Drawing(400, 240)
-    d.add(String(0, 220, title, fontName="Helvetica-Bold", fontSize=FONT_L, fillColor=colors.black))
+    """Barras com rótulos numéricos, legenda e título no canvas."""
+    c.setFont("Helvetica-Bold", FONT_L)
+    c.setFillColor(colors.black)
+    c.drawString(origin_x, origin_y + 210, title)
 
+    d = Drawing(400, 210)
     bar = VerticalBarChart()
     bar.x = 36
-    bar.y = 36
+    bar.y = 32
     bar.width  = 300
     bar.height = 150
 
@@ -278,7 +286,7 @@ def draw_bars_with_values(c, sem_counts, tri_counts, title, origin_x, origin_y):
 
     leg = Legend()
     leg.x = 265
-    leg.y = 200
+    leg.y = 190
     leg.fontName = "Helvetica"
     leg.fontSize = FONT_S
     leg.alignment = 'right'
@@ -288,20 +296,38 @@ def draw_bars_with_values(c, sem_counts, tri_counts, title, origin_x, origin_y):
     renderPDF.draw(d, c, origin_x, origin_y)
 
 def draw_heatmap(c, sem_counts, tri_counts, title, origin_x, origin_y):
+    """
+    Heatmap 2 x 5 (linhas: Semgrep, Trivy; colunas: severidades).
+    Cor-alvo por severidade: CRITICAL=vermelho, HIGH=laranja escuro, etc.
+    A intensidade mistura branco -> cor-alvo conforme o volume relativo.
+    """
+    # Título no canvas
+    c.setFont("Helvetica-Bold", FONT_L)
+    c.setFillColor(colors.black)
+    c.drawString(origin_x, origin_y + 150, title)
+
     grid_w, grid_h = 340, 110
     cell_w = grid_w / len(SEV_ORDER)
     cell_h = grid_h / 2
-    d = Drawing(grid_w, grid_h + 34)
-    d.add(String(0, grid_h + 24, title, fontName="Helvetica-Bold", fontSize=FONT_L, fillColor=colors.black))
+    d = Drawing(grid_w, grid_h)
 
     max_val = max([*sem_counts.values(), *tri_counts.values(), 1])
+
+    # alvo de cor por severidade (CRITICAL = vermelho de fato)
+    SEV_HEAT_TARGET = {
+        "CRITICAL": colors.Color(0.85, 0.10, 0.10),
+        "HIGH":     ORANGE_DARK,
+        "MEDIUM":   ORANGE_PRIMARY,
+        "LOW":      colors.HexColor("#fed7aa"),
+        "UNKNOWN":  colors.Color(0.70, 0.70, 0.70),
+    }
 
     for r, src in enumerate(["Semgrep", "Trivy"]):
         for c_idx, sev in enumerate(SEV_ORDER):
             v = sem_counts[sev] if r == 0 else tri_counts[sev]
-            intensity = v / max_val if max_val else 0
-            base = colors.Color(1.0, 0.97, 0.93)  # bem claro
-            mix  = ORANGE_PRIMARY
+            intensity = (v / max_val) if max_val else 0.0
+            base = colors.white
+            mix  = SEV_HEAT_TARGET[sev]
             fill = colors.Color(
                 base.red   + (mix.red   - base.red)   * intensity,
                 base.green + (mix.green - base.green) * intensity,
@@ -309,9 +335,14 @@ def draw_heatmap(c, sem_counts, tri_counts, title, origin_x, origin_y):
             )
             x = c_idx * cell_w
             y = (1 - r) * cell_h
-            rect = Rect(x, y, cell_w - 3, cell_h - 3, strokeWidth=0.2, strokeColor=colors.lightgrey, fillColor=fill)
+            rect = Rect(x, y, cell_w - 3, cell_h - 3,
+                        strokeWidth=0.2, strokeColor=colors.lightgrey, fillColor=fill)
             d.add(rect)
-            d.add(String(x + cell_w/2 - 6, y + cell_h/2 - 5, str(v), fontName="Helvetica", fontSize=FONT_S, fillColor=colors.black))
+
+            # Rótulo numérico com contraste automático
+            label_color = colors.white if intensity >= 0.60 else colors.black
+            d.add(String(x + cell_w/2 - 6, y + cell_h/2 - 5, str(v),
+                         fontName="Helvetica", fontSize=FONT_S, fillColor=label_color))
 
     renderPDF.draw(d, c, origin_x, origin_y)
 
@@ -586,11 +617,11 @@ def main():
     section_pages["Visão Geral – Gráficos"] = c.getPageNumber()
     y = PAGE_H - MARGIN_T
     y = draw_section_title(c, "Visão Geral – Gráficos", y)
-    y -= 12  # respiro adicional
+    y -= 14  # respiro adicional
     draw_pie_with_values(c, semgrep_counts, "Distribuição por Severidade – Semgrep",
-                         MARGIN_L, y - 280)  # aumentei 20px
+                         MARGIN_L, y - 300)  # aumentei 20px
     draw_bars_with_values(c, semgrep_counts, trivy_counts, "Semgrep × Trivy por Severidade",
-                          MARGIN_L, y - 540)
+                          MARGIN_L, y - 560)
     draw_footer(c)
     c.showPage()
 
