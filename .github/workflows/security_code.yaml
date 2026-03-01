@@ -75,6 +75,10 @@ jobs:
           output: trivy-results.json
           severity: CRITICAL,HIGH
 
+      #analise_sca_customer
+      - name: Generate PDF Security Report
+        run: python sast_scan_customer.py
+
       # PDF corporativo
       - name: Generate PDF Security Report
         run: python generate_report.py
