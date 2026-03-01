@@ -5,12 +5,12 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from reportlab.graphics.shapes import Drawing, String, Rect
-from reportlab.graphics.charts.piecharts import Pie
+# REMOVIDO: from reportlab.graphics.charts.piecharts import Pie
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.legends import Legend
 from reportlab.graphics import renderPDF
 from reportlab.lib.units import mm
-from datetime import datetime
+from datetime import datetime, timezone
 import json, os
 from math import isfinite
 
@@ -24,7 +24,8 @@ except Exception:
 # ========== CONFIG EXECUTIVA & TEMA ==========
 ORG_NAME = "Sua Empresa"
 TITLE    = "Relatório Executivo de Segurança"
-DATE_STR = datetime.utcnow().strftime("%d/%m/%Y")
+# Corrigido: usar timezone-aware e evitar DeprecationWarning
+DATE_STR = datetime.now(timezone.utc).strftime("%d/%m/%Y")
 
 PAGE_W, PAGE_H = A4
 MARGIN_L = 18 * mm
@@ -536,13 +537,14 @@ def main():
     draw_heatmap(c, semgrep_counts, trivy_counts, "Heatmap de Severidade (Semgrep × Trivy)", MARGIN_L, y - 150)
     draw_footer(c); c.showPage()
 
-    # Gráficos (offsets maiores para evitar sobreposição)
+    # Gráficos (somente barras + heatmap, sem pizza)
     section_pages["Visão Geral – Gráficos"] = c.getPageNumber()
     y = PAGE_H - MARGIN_T
     y = draw_section_title(c, "Visão Geral – Gráficos", y)
     y -= 14
-    draw_pie_with_values(c, semgrep_counts, "Distribuição por Severidade – Semgrep", MARGIN_L, y - 300)
-    draw_bars_with_values(c, semgrep_counts, trivy_counts, "SAST × SCA por Severidade", MARGIN_L, y - 560)
+    # REMOVIDO: draw_pie_with_values(...)
+    # Em vez de pizza, mantemos apenas o comparativo SAST × SCA
+    draw_bars_with_values(c, semgrep_counts, trivy_counts, "SAST × SCA por Severidade", MARGIN_L, y - 220)
     draw_footer(c); c.showPage()
 
     # Semgrep em tópicos
