@@ -45,7 +45,7 @@ SEV_ORDER = ["CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN"]
 
 # Paleta
 SEV_COLORS = {
-    "CRITICAL": colors.Color(0.85, 0.10, 0.10),  # vermelho
+    "CRITICAL": colors.HexColor("#F50F0F"),  # vermelho
     "HIGH":     colors.HexColor("#ea580c"),      # laranja escuro
     "MEDIUM":   colors.HexColor("#f97316"),      # laranja médio
     "LOW":      colors.HexColor("#fed7aa"),      # laranja claro
@@ -267,22 +267,6 @@ def draw_footer(c):
 # =========================================================
 # GRÁFICOS
 # =========================================================
-def draw_pie_with_values(c, counts, title, origin_x, origin_y):
-    total = sum(counts.values()) or 1
-    c.setFont("Helvetica-Bold", FONT_L); c.setFillColor(colors.black)
-    c.drawString(origin_x, origin_y + 230, title)
-
-    d = Drawing(360, 220)
-    pie = Pie()
-    pie.x, pie.y = 26, 10
-    pie.width, pie.height = 205, 205
-    pie.data   = [counts[s] for s in SEV_ORDER]
-    pie.labels = [f"{s} {counts[s]} ({(counts[s]/total*100):.0f}%)" for s in SEV_ORDER]
-    pie.sideLabels = True; pie.slices.strokeWidth = 0.3
-    for i, s in enumerate(SEV_ORDER):
-        pie.slices[i].fillColor = SEV_COLORS[s]
-    d.add(pie)
-    renderPDF.draw(d, c, origin_x, origin_y)
 
 def draw_bars_with_values(c, sem_counts, tri_counts, title, origin_x, origin_y):
     c.setFont("Helvetica-Bold", FONT_L); c.setFillColor(colors.black)
@@ -416,7 +400,7 @@ def draw_semgrep_topics(c, semgrep):
         - Referências: primeira(s) URLs
     """
     y = PAGE_H - MARGIN_T
-    y = draw_section_title(c, "Achados – Semgrep (tópicos)", y)
+    y = draw_section_title(c, Vulnerabilidades – SAST", y)
     for r in semgrep:
         sev = (r.get("severity") or "UNKNOWN").upper()
         heading = f"[{sev}] {r.get('rule_id','')}".strip()
@@ -437,7 +421,7 @@ def draw_semgrep_topics(c, semgrep):
 
 def draw_trivy_topics(c, vulns):
     """
-    Para cada vulnerabilidade do Trivy:
+    Para cada vulnerabilidade de SCA:
       Heading: [SEV] <VulnerabilityID> — <Title>
       Itens:
         - Pacote: <PkgName> (<Installed> -> <Fixed>)
@@ -447,7 +431,7 @@ def draw_trivy_topics(c, vulns):
         - Referência: <PrimaryURL/References[0]>
     """
     y = PAGE_H - MARGIN_T
-    y = draw_section_title(c, "Vulnerabilidades – Trivy (tópicos)", y)
+    y = draw_section_title(c, "Vulnerabilidades – SCA", y)
     for v in vulns:
         sev   = (v.get("severity") or "UNKNOWN").upper()
         vid   = v.get("id","")
@@ -558,15 +542,15 @@ def main():
     y = draw_section_title(c, "Visão Geral – Gráficos", y)
     y -= 14
     draw_pie_with_values(c, semgrep_counts, "Distribuição por Severidade – Semgrep", MARGIN_L, y - 300)
-    draw_bars_with_values(c, semgrep_counts, trivy_counts, "Semgrep × Trivy por Severidade", MARGIN_L, y - 560)
+    draw_bars_with_values(c, semgrep_counts, trivy_counts, "SAST × SCA por Severidade", MARGIN_L, y - 560)
     draw_footer(c); c.showPage()
 
     # Semgrep em tópicos
-    section_pages["Achados – Semgrep (tópicos)"] = c.getPageNumber()
+    section_pages["Vulnerabilidades – SAST"] = c.getPageNumber()
     draw_semgrep_topics(c, semgrep)
 
     # Trivy em tópicos
-    section_pages["Vulnerabilidades – Trivy (tópicos)"] = c.getPageNumber()
+    section_pages["Vulnerabilidades – SCA"] = c.getPageNumber()
     draw_trivy_topics(c, trivy)
 
     c.save()
