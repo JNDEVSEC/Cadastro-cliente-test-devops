@@ -24,7 +24,7 @@ except Exception:
 # ========== CONFIG EXECUTIVA & TEMA ==========
 ORG_NAME = "Sua Empresa"
 TITLE    = "Relatório Executivo de Segurança"
-DATE_STR = datetime.now().strftime("%d/%m/%Y %H:%M")
+DATE_STR = datetime.utcnow().strftime("%d/%m/%Y")
 
 PAGE_W, PAGE_H = A4
 MARGIN_L = 18 * mm
@@ -112,23 +112,24 @@ def draw_bullet_paragraph(c, x, y, text, max_width, bullet="• ", font="Helveti
       - Linhas seguintes alinham após o bullet (indentação)
       - Retorna a nova coordenada y após o parágrafo
     """
+    c.setFont(font, size)
     bullet_w = c.stringWidth(bullet, font, size)
-    # primeira linha tem (max_width - bullet_w), demais têm (max_width - bullet_w) também, mas com x deslocado
+
+    # quebra o texto já descontando a largura do bullet
     lines = wrap_lines(c, text, max_width - bullet_w, font=font, size=size)
 
-    # primeira linha
-    c.setFont(font, size)
+    # primeira linha com bullet
     c.drawString(x, y, bullet + (lines[0] if lines else ""))
     y -= LINE_H
 
-    # linhas subsequentes (sem bullet, mas com indentação do tamanho do bullet)
+    # linhas subsequentes alinhadas após o bullet
     cont_x = x + bullet_w
     for ln in lines[1:]:
         c.drawString(cont_x, y, ln)
         y -= LINE_H
 
     return y
-    
+
 def clamp_lines(c, lines, width, max_lines, font="Helvetica", size=FONT_S):
     if len(lines) <= max_lines:
         return lines
@@ -187,7 +188,7 @@ def extract_cvss_score_from_dict(cvss_dict):
         return None
     best = None
     for _, vals in cvss_dict.items():
-        if not isinstance(vals, dict): 
+        if not isinstance(vals, dict):
             continue
         for k in ("V4Score","V4","V4.0","V31Score","V3.1","V3Score","V3","Score","BaseScore"):
             try:
@@ -315,7 +316,7 @@ def draw_heatmap(c, sem_counts, tri_counts, title, origin_x, origin_y):
 
     max_val = max([*sem_counts.values(), *tri_counts.values(), 1])
     SEV_HEAT_TARGET = {
-        "CRITICAL": colors.Color(0.85, 0.10, 0.10),
+        "CRITICAL": colors.Color(0.85, 0.10, 0.10),  # vermelho forte
         "HIGH":     ORANGE_DARK,
         "MEDIUM":   ORANGE_PRIMARY,
         "LOW":      colors.HexColor("#fed7aa"),
@@ -365,8 +366,7 @@ def draw_topic(c, y, heading, items, color=None):
     heading_lines = wrap_lines(c, heading, CONTENT_W - 20, font="Helvetica-Bold", size=FONT_M)
     heading_height = len(heading_lines) * LINE_H + 8  # 8 de respiro
 
-    # 2) Altura estimada dos bullets
-    #    (estimativa conservadora: assume 2 linhas por item; quebrará se mais)
+    # 2) Altura estimada dos bullets (conservadora)
     bullets_est_h = max(LINE_H * 2 * len(items), LINE_H * len(items)) + 8
 
     need_h = heading_height + bullets_est_h + 12  # margem extra
@@ -392,13 +392,10 @@ def draw_topic(c, y, heading, items, color=None):
 
     # 5) Desenha os bullets (com wrap e indentação correta)
     for ln in items:
-        # quebra de página se faltar espaço
-        # estima: pelo menos 2 linhas por bullet
         if y - (LINE_H * 2) < MARGIN_B + 8:
             draw_footer(c)
             c.showPage()
             y = PAGE_H - MARGIN_T
-            # reimprime um “subtítulo” discreto para contexto (opcional)
             c.setFont("Helvetica", FONT_S)
         y = draw_bullet_paragraph(
             c, x=MARGIN_L + 10, y=y,
@@ -445,31 +442,28 @@ def draw_trivy_topics(c, vulns):
       Itens:
         - Pacote: <PkgName> (<Installed> -> <Fixed>)
         - CVSS: <score>
-        - Risco: <Description> (compacta)
+        - Risco: <Description> (wrap completo)
         - Sugestão: atualizar para <Fixed> (se disponível)
         - Referência: <PrimaryURL/References[0]>
     """
     y = PAGE_H - MARGIN_T
     y = draw_section_title(c, "Vulnerabilidades – Trivy (tópicos)", y)
     for v in vulns:
-        sev  = (v.get("severity") or "UNKNOWN").upper()
-        vid  = v.get("id","")
-        title= v.get("title") or ""
-        head = f"[{sev}] {vid}" + (f" — {title}" if title else "")
-        pkg  = v.get("pkg",""); inst=v.get("installed",""); fix=v.get("fixed","-")
-        l_pkg = f"Pacote: {pkg} ({inst} -> {fix})" if pkg or inst else None
-        l_cvss= f"CVSS: {v['cvss']:.1f}" if isinstance(v.get("cvss"),(int,float)) else None
+        sev   = (v.get("severity") or "UNKNOWN").upper()
+        vid   = v.get("id","")
+        title = v.get("title") or ""
+        head  = f"[{sev}] {vid}" + (f" — {title}" if title else "")
+        pkg   = v.get("pkg","")
+        inst  = v.get("installed","")
+        fix   = v.get("fixed","-")
 
-        # risco: compacta descrição (3 linhas máx)
-        desc = (v.get("description") or "").strip()
-        risco_lines = wrap_lines(c, desc, CONTENT_W - 36, size=FONT_S)
-        risco_lines = risco_lines[:3] + (["…"] if len(risco_lines) > 3 else [])
-        l_risk = "Risco: " + (risco_lines[0] if risco_lines else "(sem descrição)")
-        # sugestão
-        l_fix  = f"Sugestão: atualizar para {fix}" if fix and fix != "-" else "Sugestão: verificar avisos do fornecedor / aplicar patch disponível."
-        # referência
-        url = v.get("url")
-        l_ref = f"Referência: {url}" if url else None
+        l_pkg  = f"Pacote: {pkg} ({inst} -> {fix})" if (pkg or inst) else None
+        l_cvss = f"CVSS: {v['cvss']:.1f}" if isinstance(v.get("cvss"), (int,float)) else None
+        desc   = (v.get("description") or "").strip()
+        l_risk = "Risco: " + (desc if desc else "(sem descrição do fornecedor)")
+        l_fix  = f"Sugestão: atualizar para {fix}" if fix and fix != "-" else "Sugestão: verificar boletins do fornecedor / aplicar patch assim que disponível."
+        url    = v.get("url")
+        l_ref  = f"Referência: {url}" if url else None
 
         lines = [ln for ln in [l_pkg, l_cvss, l_risk, l_fix, l_ref] if ln]
         y = draw_topic(c, y, head, lines, color=SEV_COLORS.get(sev, colors.grey))
