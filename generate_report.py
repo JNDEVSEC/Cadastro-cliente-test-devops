@@ -24,7 +24,7 @@ except Exception:
 # ========== CONFIG EXECUTIVA & TEMA ==========
 ORG_NAME = "Sua Empresa"
 TITLE    = "Relatório Executivo de Segurança"
-DATE_STR = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+DATE_STR = datetime.now().strftime("%d/%m/%Y %H:%M")
 
 PAGE_W, PAGE_H = A4
 MARGIN_L = 18 * mm
@@ -59,22 +59,76 @@ ORANGE_LIGHT_BG = colors.HexColor("#fff7ed")
 # UTILITÁRIAS
 # =========================================================
 def wrap_lines(c, text, width, font="Helvetica", size=FONT_S):
+    """
+    Quebra em múltiplas linhas respeitando largura.
+    - Se a palavra for maior que a largura, faz 'hard wrap' por caracteres.
+    """
     c.setFont(font, size)
     text = (text or "").strip()
     if not text:
         return [""]
-    words = text.split()
-    lines, line = [], ""
-    for w in words:
-        test = (line + " " + w).strip()
-        if c.stringWidth(test, font, size) <= width:
-            line = test
+
+    lines = []
+    current = ""
+
+    def flush_current():
+        nonlocal current
+        if current:
+            lines.append(current.rstrip())
+            current = ""
+
+    for word in text.split():
+        if c.stringWidth(word, font, size) <= width:
+            # cabe como palavra; tenta juntar ao 'current'
+            test = (current + " " + word).strip()
+            if c.stringWidth(test, font, size) <= width:
+                current = test
+            else:
+                flush_current()
+                current = word
         else:
-            if line: lines.append(line)
-            line = w
-    if line: lines.append(line)
+            # palavra maior que a largura → quebra “hard”
+            if current:
+                flush_current()
+            chunk = ""
+            for ch in word:
+                test = chunk + ch
+                if c.stringWidth(test, font, size) <= width:
+                    chunk = test
+                else:
+                    if chunk:
+                        lines.append(chunk)
+                    chunk = ch
+            if chunk:
+                current = chunk  # último pedaço vira início da próxima linha
+
+    flush_current()
     return lines
 
+def draw_bullet_paragraph(c, x, y, text, max_width, bullet="• ", font="Helvetica", size=FONT_S):
+    """
+    Desenha um parágrafo com bullet:
+      - Primeira linha começa em x com '• '
+      - Linhas seguintes alinham após o bullet (indentação)
+      - Retorna a nova coordenada y após o parágrafo
+    """
+    bullet_w = c.stringWidth(bullet, font, size)
+    # primeira linha tem (max_width - bullet_w), demais têm (max_width - bullet_w) também, mas com x deslocado
+    lines = wrap_lines(c, text, max_width - bullet_w, font=font, size=size)
+
+    # primeira linha
+    c.setFont(font, size)
+    c.drawString(x, y, bullet + (lines[0] if lines else ""))
+    y -= LINE_H
+
+    # linhas subsequentes (sem bullet, mas com indentação do tamanho do bullet)
+    cont_x = x + bullet_w
+    for ln in lines[1:]:
+        c.drawString(cont_x, y, ln)
+        y -= LINE_H
+
+    return y
+    
 def clamp_lines(c, lines, width, max_lines, font="Helvetica", size=FONT_S):
     if len(lines) <= max_lines:
         return lines
@@ -302,37 +356,55 @@ def avg_cvss(trivy):
 def draw_topic(c, y, heading, items, color=None):
     """
     Desenha um tópico:
-      heading = título (string)
-      items   = lista de strings (linhas) já curtas
+      heading = string (será quebrada em múltiplas linhas)
+      items   = lista de strings (cada uma vira um bullet com wrap e indent)
       color   = cor do badge (opcional)
     Faz quebra de página quando necessário.
     """
-    # altura estimada (heading + n linhas)
-    need_h = 18 + len(items)*LINE_H + 6
+    # 1) Quebra do heading por largura
+    heading_lines = wrap_lines(c, heading, CONTENT_W - 20, font="Helvetica-Bold", size=FONT_M)
+    heading_height = len(heading_lines) * LINE_H + 8  # 8 de respiro
+
+    # 2) Altura estimada dos bullets
+    #    (estimativa conservadora: assume 2 linhas por item; quebrará se mais)
+    bullets_est_h = max(LINE_H * 2 * len(items), LINE_H * len(items)) + 8
+
+    need_h = heading_height + bullets_est_h + 12  # margem extra
     if y - need_h < MARGIN_B + 10:
-        draw_footer(c); c.showPage()
+        draw_footer(c)
+        c.showPage()
         y = PAGE_H - MARGIN_T
 
-    # badge opcional
+    # 3) Badge opcional à esquerda do heading
     x = MARGIN_L
     if color:
         c.setFillColor(color)
         c.roundRect(x, y-14, 10, 10, 2.5, fill=1, stroke=0)
         x += 16
-    # heading
-    c.setFont("Helvetica-Bold", FONT_M); c.setFillColor(colors.black)
-    c.drawString(x, y, heading)
-    y -= 14
-    # bullets
-    c.setFont("Helvetica", FONT_S)
+
+    # 4) Desenha o heading (todas as linhas)
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica-Bold", FONT_M)
+    for hl in heading_lines:
+        c.drawString(x, y, hl)
+        y -= LINE_H
+    y -= 4  # pequeno respiro
+
+    # 5) Desenha os bullets (com wrap e indentação correta)
     for ln in items:
-        for wrapped in wrap_lines(c, ln, CONTENT_W - 20, size=FONT_S):
-            if y - LINE_H < MARGIN_B + 8:
-                draw_footer(c); c.showPage()
-                y = PAGE_H - MARGIN_T
-                c.setFont("Helvetica", FONT_S)
-            c.drawString(MARGIN_L + 10, y, f"• {wrapped}")
-            y -= LINE_H
+        # quebra de página se faltar espaço
+        # estima: pelo menos 2 linhas por bullet
+        if y - (LINE_H * 2) < MARGIN_B + 8:
+            draw_footer(c)
+            c.showPage()
+            y = PAGE_H - MARGIN_T
+            # reimprime um “subtítulo” discreto para contexto (opcional)
+            c.setFont("Helvetica", FONT_S)
+        y = draw_bullet_paragraph(
+            c, x=MARGIN_L + 10, y=y,
+            text=ln, max_width=CONTENT_W - 20,
+            bullet="• ", font="Helvetica", size=FONT_S
+        )
     y -= 6
     return y
 
