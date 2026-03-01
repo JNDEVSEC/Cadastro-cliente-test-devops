@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: ["main"]
   schedule:
-    - cron: '16 14 * * 2'
+    - cron: '16 14 * * 2'  # terças 14:16 UTC
   workflow_dispatch:
 
 permissions:
@@ -21,12 +21,23 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Install dependencies
-        run: pip install semgrep reportlab pypdf2 jq
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      # SEMGREP
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install semgrep reportlab PyPDF2
+
+      # --- SEMGREP ---
       - name: Run Semgrep (JSON)
         run: semgrep scan --config auto --json --output semgrep.json || true
 
@@ -65,7 +76,7 @@ jobs:
         with:
           sarif_file: semgrep.sarif
 
-      # TRIVY
+      # --- TRIVY ---
       - name: Run Trivy (filesystem, JSON)
         uses: aquasecurity/trivy-action@0.33.1
         with:
@@ -74,13 +85,14 @@ jobs:
           format: json
           output: trivy-results.json
           severity: CRITICAL,HIGH
+          # Se desejar falhar o job caso encontre achados, descomente:
+          # exit-code: '1'
 
-      #analise_sca_customer
-      - name: Generate PDF Security Report
+      # --- Relatórios PDF ---
+      - name: Generate PDF Security Report (Customer)
         run: python sast_scan_customer.py
 
-      # PDF corporativo
-      - name: Generate PDF Security Report
+      - name: Generate PDF Security Report (Corporate)
         run: python generate_report.py
 
       - name: Upload all reports
@@ -94,3 +106,5 @@ jobs:
             semgrep.sarif
             trivy-results.json
             security-report.pdf
+            # Caso o script customer gere outro PDF, inclua-o também:
+            # security-report-customer.pdf
