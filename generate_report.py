@@ -15,23 +15,6 @@ import json, os
 from math import isfinite
 
 # ========== Mescla TOC + conteúdo ==========
-try:#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib import colors
-from reportlab.graphics.shapes import Drawing, String, Rect
-# REMOVIDO: from reportlab.graphics.charts.piecharts import Pie
-from reportlab.graphics.charts.barcharts import VerticalBarChart
-from reportlab.graphics.charts.legends import Legend
-from reportlab.graphics import renderPDF
-from reportlab.lib.units import mm
-from datetime import datetime, timezone
-import json, os
-from math import isfinite
-
-# ========== Mescla TOC + conteúdo ==========
 try:
     from PyPDF2 import PdfReader, PdfWriter
 except Exception:
@@ -41,7 +24,6 @@ except Exception:
 # ========== CONFIG EXECUTIVA & TEMA ==========
 ORG_NAME = "Sua Empresa"
 TITLE    = "Relatório Executivo de Segurança"
-# Corrigido: usar timezone-aware e evitar DeprecationWarning
 DATE_STR = datetime.now(timezone.utc).strftime("%d/%m/%Y")
 
 PAGE_W, PAGE_H = A4
@@ -63,7 +45,7 @@ SEV_ORDER = ["CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN"]
 
 # Paleta
 SEV_COLORS = {
-    "CRITICAL": colors.Color(0.85, 0.10, 0.10, alpha=1),  # vermelho rubro forte (exato)
+    "CRITICAL": colors.Color(0.85, 0.10, 0.10, alpha=1),  # vermelho rubro forte
     "HIGH":     colors.HexColor("#ea580c"),               # laranja escuro
     "MEDIUM":   colors.HexColor("#f97316"),               # laranja médio
     "LOW":      colors.HexColor("#fed7aa"),               # laranja claro
@@ -77,27 +59,20 @@ ORANGE_LIGHT_BG = colors.HexColor("#fff7ed")
 # UTILITÁRIAS
 # =========================================================
 def wrap_lines(c, text, width, font="Helvetica", size=FONT_S):
-    """
-    Quebra em múltiplas linhas respeitando largura.
-    - Se a palavra for maior que a largura, faz 'hard wrap' por caracteres.
-    """
+    # Quebra em múltiplas linhas respeitando largura. Faz hard wrap em palavras muito longas.
     c.setFont(font, size)
     text = (text or "").strip()
     if not text:
         return [""]
-
     lines = []
     current = ""
-
     def flush_current():
         nonlocal current
         if current:
             lines.append(current.rstrip())
             current = ""
-
     for word in text.split():
         if c.stringWidth(word, font, size) <= width:
-            # cabe como palavra; tenta juntar ao 'current'
             test = (current + " " + word).strip()
             if c.stringWidth(test, font, size) <= width:
                 current = test
@@ -105,7 +80,6 @@ def wrap_lines(c, text, width, font="Helvetica", size=FONT_S):
                 flush_current()
                 current = word
         else:
-            # palavra maior que a largura → quebra “hard”
             if current:
                 flush_current()
             chunk = ""
@@ -118,37 +92,25 @@ def wrap_lines(c, text, width, font="Helvetica", size=FONT_S):
                         lines.append(chunk)
                     chunk = ch
             if chunk:
-                current = chunk  # último pedaço vira início da próxima linha
-
+                current = chunk
     flush_current()
     return lines
 
 def draw_bullet_paragraph(c, x, y, text, max_width, bullet="• ", font="Helvetica", size=FONT_S):
-    """
-    Desenha um parágrafo com bullet:
-      - Primeira linha começa em x com '• '
-      - Linhas seguintes alinham após o bullet (indentação)
-      - Retorna a nova coordenada y após o parágrafo
-    """
+    # Parágrafo com bullet e indent nas linhas subsequentes.
     c.setFont(font, size)
     bullet_w = c.stringWidth(bullet, font, size)
-
-    # quebra o texto já descontando a largura do bullet
     lines = wrap_lines(c, text, max_width - bullet_w, font=font, size=size)
-
-    # primeira linha com bullet
     c.drawString(x, y, bullet + (lines[0] if lines else ""))
     y -= LINE_H
-
-    # linhas subsequentes alinhadas após o bullet
     cont_x = x + bullet_w
     for ln in lines[1:]:
         c.drawString(cont_x, y, ln)
         y -= LINE_H
-
     return y
 
 def clamp_lines(c, lines, width, max_lines, font="Helvetica", size=FONT_S):
+    # Limita número de linhas, adicionando reticências no fim da última.
     if len(lines) <= max_lines:
         return lines
     c.setFont(font, size)
@@ -161,10 +123,12 @@ def clamp_lines(c, lines, width, max_lines, font="Helvetica", size=FONT_S):
     return trimmed
 
 def count_by_severity(items, key="severity"):
+    # Conta itens por severidade, normalizando desconhecidos para "UNKNOWN".
     counts = {s:0 for s in SEV_ORDER}
     for it in items:
         sev = (it.get(key) or "UNKNOWN").upper()
-        if sev not in counts: sev = "UNKNOWN"
+        if sev not in counts:
+            sev = "UNKNOWN"
         counts[sev] += 1
     return counts
 
@@ -172,14 +136,7 @@ def count_by_severity(items, key="severity"):
 # CARREGAMENTO DE DADOS
 # =========================================================
 def load_semgrep_rich():
-    """
-    Lê semgrep.json (rico) para ter message/fix/references.
-    Campos usados:
-      - check_id (nome da vulnerabilidade/regra)
-      - path, start.line
-      - extra.severity, extra.message, extra.fix (opcional),
-        extra.metadata.references (lista, opcional)
-    """
+    # Lê semgrep.json (rico) com message/fix/references.
     if not os.path.exists("semgrep.json"):
         return []
     try:
@@ -202,6 +159,7 @@ def load_semgrep_rich():
     return out
 
 def extract_cvss_score_from_dict(cvss_dict):
+    # Tenta extrair o melhor score do dicionário CVSS (prioriza v4 se houver).
     if not isinstance(cvss_dict, dict):
         return None
     best = None
@@ -218,19 +176,13 @@ def extract_cvss_score_from_dict(cvss_dict):
     return best
 
 def approx_score_from_severity(sev):
+    # Aproxima CVSS a partir do nível quando não há score explícito.
     return {
         "CRITICAL": 9.5, "HIGH": 7.5, "MEDIUM": 5.5, "LOW": 2.0, "UNKNOWN": 0.1
     }.get((sev or "UNKNOWN").upper(), 0.1)
 
 def load_trivy_rich():
-    """
-    Lê trivy-results.json (rico) para ter Title, Description, URLs, CVSS etc.
-    Campos usados:
-      - VulnerabilityID, Title, Description, Severity
-      - PkgName, InstalledVersion, FixedVersion
-      - CVSS (dict) → score prioritizando v4.0
-      - PrimaryURL, References
-    """
+    # Lê trivy-results.json (rico) para Title, Description, URLs, CVSS etc.
     if not os.path.exists("trivy-results.json"):
         return []
     try:
@@ -285,15 +237,10 @@ def draw_footer(c):
 # =========================================================
 # GRÁFICOS
 # =========================================================
-
 def draw_bars_with_values(c, sem_counts, tri_counts, title, origin_x, origin_y):
-    """
-    (Mantido para referência) Gráfico comparativo de 2 séries com uma cor por série.
-    OBS: Não pinta por severidade. Para cores por severidade, use draw_grouped_bars_by_severity.
-    """
+    # (Mantido para referência) Chart de 2 séries com 1 cor por série (não pinta por severidade).
     c.setFont("Helvetica-Bold", FONT_L); c.setFillColor(colors.black)
     c.drawString(origin_x, origin_y + 210, title)
-
     d = Drawing(400, 210)
     bar = VerticalBarChart()
     bar.x, bar.y = 36, 32
@@ -322,10 +269,7 @@ def draw_grouped_bars_by_severity(
     width: float = 400,
     height: float = 240,
 ):
-    """
-    Barras agrupadas por severidade (cada severidade com sua cor).
-    Em cada grupo (severity), duas barras: Semgrep e Trivy.
-    """
+    # Barras agrupadas por severidade (cada severidade com sua cor).
     top_title_h = 22
     bottom_axis_h = 22
     left_pad = 32
@@ -334,8 +278,6 @@ def draw_grouped_bars_by_severity(
     chart_h = max(80, height - top_title_h - bottom_axis_h)
 
     d = Drawing(width, height)
-
-    # Título
     d.add(String(width / 2.0, height - 6, title,
                  fontName="Helvetica-Bold", fontSize=14, textAnchor="middle"))
 
@@ -357,7 +299,6 @@ def draw_grouped_bars_by_severity(
     ox = left_pad
     oy = bottom_axis_h
 
-    # eixo base
     d.add(Rect(ox - 1, oy - 1, chart_w + 2, 1.2, fillColor=colors.black, strokeWidth=0))
 
     cursor_x = ox
@@ -374,32 +315,27 @@ def draw_grouped_bars_by_severity(
         bx_sem = cursor_x
         bx_tri = cursor_x + bar_w + gap_in_group
 
-        # Semgrep
         d.add(Rect(bx_sem, oy, bar_w, h_sem,
                    fillColor=sev_color, strokeColor=colors.black, strokeWidth=0.2))
         if v_sem > 0:
             d.add(String(bx_sem + bar_w/2.0, oy + h_sem + 6, str(v_sem),
                          fontName="Helvetica", fontSize=9, textAnchor="middle"))
 
-        # Trivy
         d.add(Rect(bx_tri, oy, bar_w, h_tri,
                    fillColor=sev_color, strokeColor=colors.black, strokeWidth=0.2))
         if v_tri > 0:
             d.add(String(bx_tri + bar_w/2.0, oy + h_tri + 6, str(v_tri),
                          fontName="Helvetica", fontSize=9, textAnchor="middle"))
 
-        # label da severidade
         d.add(String(cursor_x + group_w/2.0, labels_y, s,
                      fontName="Helvetica", fontSize=9, textAnchor="middle"))
 
         cursor_x += (group_w + group_pad)
 
-    # Escala horizontal se necessário
     if scale_x < 1.0:
         d.scale(scale_x, 1.0)
         d.translate(ox * (1 - scale_x) / scale_x, 0)
 
-    # Legenda (Semgrep/Trivy)
     leg = Legend()
     leg.fontName = "Helvetica"
     leg.fontSize = 10
@@ -415,6 +351,7 @@ def draw_grouped_bars_by_severity(
     renderPDF.draw(d, c, x, y)
 
 def draw_heatmap(c, sem_counts, tri_counts, title, origin_x, origin_y):
+    # Heatmap simples por severidade, com mistura baseada na intensidade.
     c.setFont("Helvetica-Bold", FONT_L); c.setFillColor(colors.black)
     c.drawString(origin_x, origin_y + 150, title)
 
@@ -424,14 +361,14 @@ def draw_heatmap(c, sem_counts, tri_counts, title, origin_x, origin_y):
 
     max_val = max([*sem_counts.values(), *tri_counts.values(), 1])
     SEV_HEAT_TARGET = {
-        "CRITICAL": colors.Color(0.85, 0.10, 0.10, alpha=1),  # vermelho rubro forte
+        "CRITICAL": colors.Color(0.85, 0.10, 0.10, alpha=1),
         "HIGH":     ORANGE_DARK,
         "MEDIUM":   ORANGE_PRIMARY,
         "LOW":      colors.HexColor("#fed7aa"),
         "UNKNOWN":  colors.Color(0.70, 0.70, 0.70),
     }
 
-    for r, src in enumerate(["Semgrep","Trivy"]):
+    for r, _src in enumerate(["Semgrep","Trivy"]):
         for c_idx, sev in enumerate(SEV_ORDER):
             v = sem_counts[sev] if r == 0 else tri_counts[sev]
             intensity = (v / max_val) if max_val else 0.0
@@ -463,42 +400,29 @@ def avg_cvss(trivy):
 # TÓPICOS (Semgrep & Trivy)
 # =========================================================
 def draw_topic(c, y, heading, items, color=None):
-    """
-    Desenha um tópico:
-      heading = string (será quebrada em múltiplas linhas)
-      items   = lista de strings (cada uma vira um bullet com wrap e indent)
-      color   = cor do badge (opcional)
-    Faz quebra de página quando necessário.
-    """
-    # 1) Quebra do heading por largura
+    # Tópico com heading e bullets (faz quebra de página automática).
     heading_lines = wrap_lines(c, heading, CONTENT_W - 20, font="Helvetica-Bold", size=FONT_M)
-    heading_height = len(heading_lines) * LINE_H + 8  # 8 de respiro
-
-    # 2) Altura estimada dos bullets (conservadora)
+    heading_height = len(heading_lines) * LINE_H + 8
     bullets_est_h = max(LINE_H * 2 * len(items), LINE_H * len(items)) + 8
-
-    need_h = heading_height + bullets_est_h + 12  # margem extra
+    need_h = heading_height + bullets_est_h + 12
     if y - need_h < MARGIN_B + 10:
         draw_footer(c)
         c.showPage()
         y = PAGE_H - MARGIN_T
 
-    # 3) Badge opcional à esquerda do heading
     x = MARGIN_L
     if color:
         c.setFillColor(color)
         c.roundRect(x, y-14, 10, 10, 2.5, fill=1, stroke=0)
         x += 16
 
-    # 4) Desenha o heading (todas as linhas)
     c.setFillColor(colors.black)
     c.setFont("Helvetica-Bold", FONT_M)
     for hl in heading_lines:
         c.drawString(x, y, hl)
         y -= LINE_H
-    y -= 4  # pequeno respiro
+    y -= 4
 
-    # 5) Desenha os bullets (com wrap e indentação correta)
     for ln in items:
         if y - (LINE_H * 2) < MARGIN_B + 8:
             draw_footer(c)
@@ -514,15 +438,7 @@ def draw_topic(c, y, heading, items, color=None):
     return y
 
 def draw_semgrep_topics(c, semgrep):
-    """
-    Para cada achado do Semgrep:
-      Heading: [SEV] <check_id>
-      Itens:
-        - Arquivo: <path>:<line>
-        - Risco:   <extra.message>
-        - Sugestão: <extra.fix> (se houver) ou orientação genérica
-        - Referências: primeira(s) URLs
-    """
+    # Lista achados Semgrep em tópicos.
     y = PAGE_H - MARGIN_T
     y = draw_section_title(c, "Vulnerabilidades – SAST", y)
     for r in semgrep:
@@ -539,21 +455,13 @@ def draw_semgrep_topics(c, semgrep):
         ref_line = f"Referências: {', '.join(refs[:2])}" if refs else None
 
         lines = [arquivo, risco, sugestao]
-        if ref_line: lines.append(ref_line)
+        if ref_line:
+            lines.append(ref_line)
         y = draw_topic(c, y, heading, lines, color=SEV_COLORS.get(sev, colors.grey))
     draw_footer(c); c.showPage()
 
 def draw_trivy_topics(c, vulns):
-    """
-    Para cada vulnerabilidade de SCA:
-      Heading: [SEV] <VulnerabilityID> — <Title>
-      Itens:
-        - Pacote: <PkgName> (<Installed> -> <Fixed>)
-        - CVSS: <score>
-        - Risco: <Description> (wrap completo)
-        - Sugestão: atualizar para <Fixed> (se disponível)
-        - Referência: <PrimaryURL/References[0]>
-    """
+    # Lista vulnerabilidades SCA (Trivy) em tópicos.
     y = PAGE_H - MARGIN_T
     y = draw_section_title(c, "Vulnerabilidades – SCA", y)
     for v in vulns:
@@ -568,8 +476,7 @@ def draw_trivy_topics(c, vulns):
         l_pkg  = f"Pacote: {pkg} ({inst} -> {fix})" if (pkg or inst) else None
         l_cvss = f"CVSS: {v['cvss']:.1f}" if isinstance(v.get("cvss"), (int,float)) else None
         desc   = (v.get("description") or "").strip()
-        l_risk = "Risco: " + (desc if desc else "(sem descrição do fornecedor)"
-                               )
+        l_risk = "Risco: " + (desc if desc else "(sem descrição do fornecedor)")
         l_fix  = f"Sugestão: atualizar para {fix}" if fix and fix != "-" else \
                  "Sugestão: verificar boletins do fornecedor / aplicar patch assim que disponível."
         url    = v.get("url")
@@ -604,15 +511,20 @@ def build_toc_pdf(toc_items, outfile="toc.pdf"):
 
 def merge_cover_toc_content(content_path="content.pdf", toc_path="toc.pdf", out_path="security-report.pdf"):
     if PdfReader is None or PdfWriter is None:
-        try: os.replace(content_path, out_path)
-        except Exception: pass
+        try:
+            os.replace(content_path, out_path)
+        except Exception:
+            pass
         return
     reader = PdfReader(content_path); writer = PdfWriter()
     writer.add_page(reader.pages[0])  # capa
     toc_reader = PdfReader(toc_path)
-    for p in toc_reader.pages: writer.add_page(p)
-    for i in range(1, len(reader.pages)): writer.add_page(reader.pages[i])
-    with open(out_path, "wb") as f: writer.write(f)
+    for p in toc_reader.pages:
+        writer.add_page(p)
+    for i in range(1, len(reader.pages)):
+        writer.add_page(reader.pages[i])
+    with open(out_path, "wb") as f:
+        writer.write(f)
 
 # =========================================================
 # PRINCIPAL
@@ -662,12 +574,11 @@ def main():
     draw_heatmap(c, semgrep_counts, trivy_counts, "Heatmap de Severidade (Semgrep × Trivy)", MARGIN_L, y - 150)
     draw_footer(c); c.showPage()
 
-    # Gráficos (somente barras + heatmap, sem pizza)
+    # Gráficos (somente barras + heatmap)
     section_pages["Visão Geral – Gráficos"] = c.getPageNumber()
     y = PAGE_H - MARGIN_T
     y = draw_section_title(c, "Visão Geral – Gráficos", y)
     y -= 14
-    # Comparativo SAST × SCA colorindo por SEVERIDADE (CRITICAL = vermelho forte)
     draw_grouped_bars_by_severity(
         c,
         semgrep_counts,
@@ -705,148 +616,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    from PyPDF2 import PdfReader, PdfWriter
-except Exception:
-    PdfReader = None
-    PdfWriter = None
-
-# ========== CONFIG EXECUTIVA & TEMA ==========
-ORG_NAME = "Sua Empresa"
-TITLE    = "Relatório Executivo de Segurança"
-# Corrigido: usar timezone-aware e evitar DeprecationWarning
-DATE_STR = datetime.now(timezone.utc).strftime("%d/%m/%Y")
-
-PAGE_W, PAGE_H = A4
-MARGIN_L = 18 * mm
-MARGIN_R = 18 * mm
-MARGIN_T = 18 * mm
-MARGIN_B = 16 * mm
-CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
-
-# Tipografia
-FONT_XS = 8.5
-FONT_S  = 9.0
-FONT_M  = 10.0
-FONT_L  = 12.0
-FONT_H  = 16.0
-LINE_H  = 12.0
-
-SEV_ORDER = ["CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN"]
-
-# Paleta
-SEV_COLORS = {
-    "CRITICAL": colors.Color(0.85, 0.10, 0.10, alpha=1),  # vermelho rubro forte (exato)
-    "HIGH":     colors.HexColor("#ea580c"),               # laranja escuro
-    "MEDIUM":   colors.HexColor("#f97316"),               # laranja médio
-    "LOW":      colors.HexColor("#fed7aa"),               # laranja claro
-    "UNKNOWN":  colors.Color(0.60, 0.60, 0.60),           # cinza
-}
-ORANGE_PRIMARY  = colors.HexColor("#f97316")
-ORANGE_DARK     = colors.HexColor("#ea580c")
-ORANGE_LIGHT_BG = colors.HexColor("#fff7ed")
-
-# =========================================================
-# UTILITÁRIAS
-# =========================================================
-def wrap_lines(c, text, width, font="Helvetica", size=FONT_S):
-    """
-    Quebra em múltiplas linhas respeitando largura.
-    - Se a palavra for maior que a largura, faz 'hard wrap' por caracteres.
-    """
-    c.setFont(font, size)
-    text = (text or "").strip()
-    if not text:
-        return [""]
-
-    lines = []
-    current = ""
-
-    def flush_current():
-        nonlocal current
-        if current:
-            lines.append(current.rstrip())
-            current = ""
-
-    for word in text.split():
-        if c.stringWidth(word, font, size) <= width:
-            # cabe como palavra; tenta juntar ao 'current'
-            test = (current + " " + word).strip()
-            if c.stringWidth(test, font, size) <= width:
-                current = test
-            else:
-                flush_current()
-                current = word
-        else:
-            # palavra maior que a largura → quebra “hard”
-            if current:
-                flush_current()
-            chunk = ""
-            for ch in word:
-                test = chunk + ch
-                if c.stringWidth(test, font, size) <= width:
-                    chunk = test
-                else:
-                    if chunk:
-                        lines.append(chunk)
-                    chunk = ch
-            if chunk:
-                current = chunk  # último pedaço vira início da próxima linha
-
-    flush_current()
-    return lines
-
-def draw_bullet_paragraph(c, x, y, text, max_width, bullet="• ", font="Helvetica", size=FONT_S):
-    """
-    Desenha um parágrafo com bullet:
-      - Primeira linha começa em x com '• '
-      - Linhas seguintes alinham após o bullet (indentação)
-      - Retorna a nova coordenada y após o parágrafo
-    """
-    c.setFont(font, size)
-    bullet_w = c.stringWidth(bullet, font, size)
-
-    # quebra o texto já descontando a largura do bullet
-    lines = wrap_lines(c, text, max_width - bullet_w, font=font, size=size)
-
-    # primeira linha com bullet
-    c.drawString(x, y, bullet + (lines[0] if lines else ""))
-    y -= LINE_H
-
-    # linhas subsequentes alinhadas após o bullet
-    cont_x = x + bullet_w
-    for ln in lines[1:]:
-        c.drawString(cont_x, y, ln)
-        y -= LINE_H
-
-    return y
-
-def clamp_lines(c, lines, width, max_lines, font="Helvetica", size=FONT_S):
-    if len(lines) <= max_lines:
-        return lines
-    c.setFont(font, size)
-    trimmed = lines[:max_lines]
-    last = trimmed[-1]
-    ell = "…"
-    while last and c.stringWidth(last + ell, font, size) > width:
-        last = last[:-1]
-    trimmed[-1] = (last + ell) if last else ell
-    return trimmed
-
-def count_by_severity(items, key="severity"):
-    counts = {s:0 for s in SEV_ORDER}
-    for it in items:
-        sev = (it.get(key) or "UNKNOWN").upper()
-        if sev not in counts: sev = "UNKNOWN"
-        counts[sev] += 1
-    return counts
-
-# =========================================================
-# CARREGAMENTO DE DADOS
-# =========================================================
-def load_semgrep_rich():
-    """
-    Lê semgrep.json (rico) para ter message/fix/references.
-    Campos usados:
-      - check_id (nome da vulnerabilidade/regra)
-      - path, start.line
-      - extra.severity, extra.message, extra.fix (opcional),
