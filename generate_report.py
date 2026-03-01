@@ -22,7 +22,7 @@ except Exception:
     PdfWriter = None
 
 # ========== CONFIG EXECUTIVA & TEMA ==========
-ORG_NAME = "Sua Empresa"
+ORG_NAME = "JNDEVSEC"
 TITLE    = "Relatório Executivo de Segurança"
 # Corrigido: usar timezone-aware e evitar DeprecationWarning
 DATE_STR = datetime.now(timezone.utc).strftime("%d/%m/%Y")
@@ -301,7 +301,7 @@ def draw_heatmap(c, sem_counts, tri_counts, title, origin_x, origin_y):
 
     max_val = max([*sem_counts.values(), *tri_counts.values(), 1])
     SEV_HEAT_TARGET = {
-        "CRITICAL": colors.Color(0.85, 0.10, 0.10),  # vermelho forte
+        "CRITICAL": colors.HexColor("#B00020")
         "HIGH":     ORANGE_DARK,
         "MEDIUM":   ORANGE_PRIMARY,
         "LOW":      colors.HexColor("#fed7aa"),
@@ -534,7 +534,7 @@ def main():
     c.drawString(MARGIN_L, y, f"CVSS médio (prioridade 4.0; fallback 3.x / nível): {avg:.1f}" if avg is not None else "CVSS médio: N/A")
     y -= 12
 
-    draw_heatmap(c, semgrep_counts, trivy_counts, "Heatmap de Severidade (Semgrep × Trivy)", MARGIN_L, y - 150)
+    draw_heatmap(c, semgrep_counts, trivy_counts, "Heatmap de Severidade (SAST × SCA)", MARGIN_L, y - 150)
     draw_footer(c); c.showPage()
 
     # Gráficos (somente barras + heatmap, sem pizza)
