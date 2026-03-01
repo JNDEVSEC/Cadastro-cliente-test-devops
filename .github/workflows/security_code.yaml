@@ -1,329 +1,105 @@
-# generate_report.py
-# ---------------------------------------------
-# Relatório de Segurança (Semgrep + Trivy)
-# Gera security-report.pdf com gráficos de barras e resumo.
-# ---------------------------------------------
+name: Security Scan
 
-import json
-import os
-from datetime import datetime, timezone
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: '16 14 * * 2'  # terças 14:16 UTC
+  workflow_dispatch:
 
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import cm
-from reportlab.pdfgen import canvas
+permissions:
+  contents: read
+  security-events: write
 
-from reportlab.graphics.shapes import Drawing, String
-from reportlab.graphics import renderPDF
-from reportlab.graphics.charts.barcharts import VerticalBarChart
+jobs:
+  scan:
+    name: Security Scan (Semgrep + Trivy)
+    runs-on: ubuntu-latest
 
-# ---------------------------------------------
-# Configurações gerais
-# ---------------------------------------------
-PAGE_WIDTH, PAGE_HEIGHT = A4
-MARGIN_L = 2 * cm
-MARGIN_R = 2 * cm
-MARGIN_T = 2 * cm
-MARGIN_B = 2 * cm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-TITLE = "Relatório de Segurança"
-SUBTITLE = "Semgrep + Trivy"
-DATE_STR = datetime.now(timezone.utc).strftime("%d/%m/%Y")
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-# Ordem fixa para consistência no relatório
-SEVERITIES_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
 
-# Paleta de cores por severidade
-SEVERITY_COLORS = {
-    "CRITICAL": colors.Color(0.80, 0.00, 0.00),  # vermelho forte
-    "HIGH":     colors.Color(0.95, 0.40, 0.00),  # laranja
-    "MEDIUM":   colors.Color(0.98, 0.82, 0.00),  # amarelo
-    "LOW":      colors.Color(0.30, 0.65, 0.30),  # verde
-    "INFO":     colors.Color(0.55, 0.60, 0.70),  # cinza/azulado
-}
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install semgrep reportlab PyPDF2
 
-# Mapeamentos de severidade para o conjunto padrão
-SEMGREP_SEVERITY_MAP = {
-    "CRITICAL": "CRITICAL",
-    "ERROR": "HIGH",        # Semgrep pode usar ERROR/WARNING/INFO
-    "HIGH": "HIGH",
-    "WARNING": "MEDIUM",
-    "MEDIUM": "MEDIUM",
-    "LOW": "LOW",
-    "INFO": "INFO",
-    "INFORMATIONAL": "INFO",
-}
+      # --- SEMGREP ---
+      - name: Run Semgrep (JSON)
+        run: semgrep scan --config auto --json --output semgrep.json || true
 
-TRIVY_SEVERITY_MAP = {
-    "CRITICAL": "CRITICAL",
-    "HIGH": "HIGH",
-    "MEDIUM": "MEDIUM",
-    "LOW": "LOW",
-    "UNKNOWN": "INFO",  # Trivy usa "UNKNOWN": tratamos como INFO
-}
+      - name: Run Semgrep (SARIF)
+        run: semgrep scan --config auto --sarif --output semgrep.sarif || true
 
+      - name: Convert JSON to CSV
+        run: |
+          jq -r '
+            ["Rule ID","Severity","File","Line","Message"],
+            (.results[]? | [
+              .check_id,
+              .extra.severity,
+              .path,
+              .start.line,
+              .extra.message
+            ]) | @csv
+          ' semgrep.json > semgrep.csv
 
-# ---------------------------------------------
-# Funções utilitárias de leitura/contagem
-# ---------------------------------------------
-def safe_load_json(path: str):
-    """Carrega um JSON com tolerância a arquivo não encontrado ou malformado."""
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
+      - name: Build flat JSON
+        run: |
+          jq '{
+            results: [
+              .results[]? | {
+                rule_id: .check_id,
+                severity: .extra.severity,
+                file: .path,
+                line: .start.line,
+                message: .extra.message
+              }
+            ]
+          }' semgrep.json > semgrep.report.json
 
+      - name: Upload Semgrep SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: semgrep.sarif
 
-def init_counts():
-    """Cria dicionário de contagem com severidades padrão zeradas."""
-    return {k: 0 for k in SEVERITIES_ORDER}
+      # --- TRIVY ---
+      - name: Run Trivy (filesystem, JSON)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: trivy-results.json
+          severity: CRITICAL,HIGH
+          # Se quiser falhar quando houver achados críticos/altos:
+          # exit-code: '1'
 
+      # --- Relatório PDF ---
+      - name: Generate PDF Security Report (Corporate)
+        run: python generate_report.py
 
-def normalize_severity(value: str, mapping: dict) -> str:
-    if not value:
-        return "INFO"
-    v = str(value).strip().upper()
-    return mapping.get(v, "INFO")
-
-
-def parse_semgrep_counts(semgrep_json_path: str):
-    """
-    Lê semgrep.json (formato --json) e retorna:
-      - counts: dict severidade->qtd
-      - total: int (total de achados)
-      - results: lista de achados simplificados
-    """
-    data = safe_load_json(semgrep_json_path)
-    counts = init_counts()
-    results_out = []
-
-    if not data or "results" not in data:
-        return counts, 0, results_out
-
-    for r in data.get("results", []):
-        extra = r.get("extra", {})
-        sev_raw = extra.get("severity")
-        sev = normalize_severity(sev_raw, SEMGREP_SEVERITY_MAP)
-        if sev not in counts:
-            counts[sev] = 0
-        counts[sev] += 1
-
-        results_out.append({
-            "rule_id": r.get("check_id"),
-            "severity": sev,
-            "file": r.get("path"),
-            "line": (r.get("start") or {}).get("line"),
-            "message": extra.get("message"),
-        })
-
-    total = sum(counts.values())
-    return counts, total, results_out
-
-
-def parse_trivy_counts(trivy_json_path: str):
-    """
-    Lê trivy-results.json e retorna:
-      - counts: dict severidade->qtd
-      - total: int
-    """
-    data = safe_load_json(trivy_json_path)
-    counts = init_counts()
-
-    if not data:
-        return counts, 0
-
-    # Estrutura típica do Trivy: {"Results": [{ "Vulnerabilities": [ ... ] }, ...]}
-    results = data.get("Results", [])
-    for res in results or []:
-        vulns = res.get("Vulnerabilities", [])
-        for v in vulns or []:
-            sev_raw = v.get("Severity")
-            sev = normalize_severity(sev_raw, TRIVY_SEVERITY_MAP)
-            if sev not in counts:
-                counts[sev] = 0
-            counts[sev] += 1
-
-    total = sum(counts.values())
-    return counts, total
-
-
-# ---------------------------------------------
-# Funções de desenho (gráficos e layout)
-# ---------------------------------------------
-def draw_header(c: canvas.Canvas):
-    c.setFont("Helvetica-Bold", 20)
-    c.drawString(MARGIN_L, PAGE_HEIGHT - MARGIN_T, TITLE)
-    c.setFont("Helvetica", 12)
-    c.drawString(MARGIN_L, PAGE_HEIGHT - MARGIN_T - 18, SUBTITLE)
-    c.drawRightString(PAGE_WIDTH - MARGIN_R, PAGE_HEIGHT - MARGIN_T, f"Data: {DATE_STR}")
-    c.line(MARGIN_L, PAGE_HEIGHT - MARGIN_T - 26, PAGE_WIDTH - MARGIN_R, PAGE_HEIGHT - MARGIN_T - 26)
-
-
-def draw_footer(c: canvas.Canvas, page_num: int = 1):
-    c.setFont("Helvetica", 9)
-    c.setFillColor(colors.grey)
-    c.drawRightString(PAGE_WIDTH - MARGIN_R, MARGIN_B - 10, f"Página {page_num}")
-    c.setFillColor(colors.black)
-
-
-def draw_kpis(c: canvas.Canvas, left_x: float, y: float, kpis: list):
-    """
-    Desenha KPIs simples (rótulo e valor).
-    kpis: lista de tuplas (label, value)
-    """
-    c.setFont("Helvetica-Bold", 12)
-    for label, value in kpis:
-        c.drawString(left_x, y, f"{label}: {value}")
-        y -= 16
-    return y
-
-
-def draw_bars_with_values(c, counts_dict, title, x, y, width=300, height=220):
-    """
-    Gráfico de barras verticais com valores no topo das barras.
-    """
-    counts_dict = counts_dict or {}
-    data = [int(counts_dict.get(sev, 0) or 0) for sev in SEVERITIES_ORDER]
-
-    d = Drawing(width, height)
-    d.add(String(width / 2.0, height - 14, title, fontName="Helvetica-Bold", fontSize=12, textAnchor="middle"))
-
-    bc = VerticalBarChart()
-    bc.x = 40
-    bc.y = 30
-    bc.width = width - 80
-    bc.height = height - 80
-    bc.data = [data]
-    bc.categoryAxis.categoryNames = SEVERITIES_ORDER
-    bc.categoryAxis.labels.boxAnchor = 'ne'
-    bc.categoryAxis.labels.angle = 30
-    bc.categoryAxis.labels.dy = -15
-    bc.valueAxis.valueMin = 0
-    bc.barWidth = 14
-    bc.groupSpacing = 16
-    bc.barSpacing = 4
-
-    # Cores por barra (severidade)
-    for i, sev in enumerate(SEVERITIES_ORDER):
-        if i < len(bc.bars):
-            bc.bars[i].fillColor = SEVERITY_COLORS.get(sev, colors.lightgrey)
-
-    d.add(bc)
-
-    # Desenhar valores no topo das barras
-    max_val = max(data) if data else 0
-    if max_val > 0:
-        x0 = bc.x
-        y0 = bc.y
-        w = bc.width
-        n = len(data)
-        if n > 0:
-            step = w / max(1, n)
-            for i, val in enumerate(data):
-                ratio = 0 if max_val == 0 else val / float(max_val)
-                # posição aproximada do centro da barra
-                bx = x0 + (i + 0.5) * step
-                by = y0 + ratio * (bc.height)
-                d.add(String(bx, by + 8, str(val), fontName="Helvetica", fontSize=9, textAnchor="middle"))
-
-    renderPDF.draw(d, c, x, y)
-
-
-# ---------------------------------------------
-# Geração do PDF
-# ---------------------------------------------
-def main():
-    # Arquivos de entrada esperados (conforme o pipeline)
-    semgrep_json_path = "semgrep.json"
-    trivy_json_path = "trivy-results.json"
-
-    # Lê e prepara dados
-    semgrep_counts, semgrep_total, _semgrep_results = parse_semgrep_counts(semgrep_json_path)
-    trivy_counts, trivy_total = parse_trivy_counts(trivy_json_path)
-
-    # Cria PDF
-    out_pdf = "security-report.pdf"
-    c = canvas.Canvas(out_pdf, pagesize=A4)
-
-    # Cabeçalho
-    draw_header(c)
-
-    # Y inicial (abaixo do cabeçalho)
-    y = PAGE_HEIGHT - MARGIN_T - 40
-
-    # KPIs resumidos
-    y = draw_kpis(
-        c,
-        MARGIN_L,
-        y,
-        [
-            ("Total Semgrep", semgrep_total),
-            ("Total Trivy", trivy_total),
-        ],
-    ) - 10
-
-    # Linha separadora
-    c.setStrokeColor(colors.lightgrey)
-    c.line(MARGIN_L, y, PAGE_WIDTH - MARGIN_R, y)
-    y -= 20
-    c.setStrokeColor(colors.black)
-
-    # Área de gráficos — SOMENTE BARRAS
-    bar_width_total = PAGE_WIDTH - MARGIN_L - MARGIN_R
-    block_height = 230
-
-    # Barras Semgrep
-    draw_bars_with_values(
-        c,
-        semgrep_counts,
-        "Severidades – Semgrep",
-        MARGIN_L,
-        max(y - block_height, MARGIN_B),
-        width=bar_width_total,
-        height=block_height,
-    )
-
-    y = max(y - block_height - 24, MARGIN_B + 24)
-
-    # Barras Trivy
-    draw_bars_with_values(
-        c,
-        trivy_counts,
-        "Severidades – Trivy",
-        MARGIN_L,
-        max(y - block_height, MARGIN_B),
-        width=bar_width_total,
-        height=block_height,
-    )
-
-    y = max(y - block_height - 24, MARGIN_B + 24)
-
-    # Consolidado (somatório Semgrep + Trivy)
-    consolidated = init_counts()
-    for sev in SEVERITIES_ORDER:
-        consolidated[sev] = int(semgrep_counts.get(sev, 0)) + int(trivy_counts.get(sev, 0))
-
-    draw_bars_with_values(
-        c,
-        consolidated,
-        "Consolidado – Severidades (Semgrep + Trivy)",
-        MARGIN_L,
-        max(y - block_height, MARGIN_B),
-        width=bar_width_total,
-        height=block_height,
-    )
-
-    # Rodapé
-    draw_footer(c, page_num=1)
-
-    # Finaliza PDF
-    c.showPage()
-    c.save()
-    print(f"[OK] Relatório gerado: {out_pdf}")
-
-
-if __name__ == "__main__":
-    main()
+      - name: Upload all reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            semgrep.json
+            semgrep.csv
+            semgrep.report.json
+            semgrep.sarif
+            trivy-results.json
+            security-report.pdf
