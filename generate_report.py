@@ -301,7 +301,7 @@ def draw_heatmap(c, sem_counts, tri_counts, title, origin_x, origin_y):
 
     max_val = max([*sem_counts.values(), *tri_counts.values(), 1])
     SEV_HEAT_TARGET = {
-        "CRITICAL": colors.Color(0.85, 0.10, 0.10),  # vermelho forte
+        "CRITICAL": colors.HexColor("#F50F0F"),
         "HIGH":     ORANGE_DARK,
         "MEDIUM":   ORANGE_PRIMARY,
         "LOW":      colors.HexColor("#fed7aa"),
