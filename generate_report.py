@@ -400,7 +400,7 @@ def draw_semgrep_topics(c, semgrep):
         - Referências: primeira(s) URLs
     """
     y = PAGE_H - MARGIN_T
-    y = draw_section_title(c, Vulnerabilidades – SAST", y)
+    y = draw_section_title(c, "Vulnerabilidades – SAST", y)
     for r in semgrep:
         sev = (r.get("severity") or "UNKNOWN").upper()
         heading = f"[{sev}] {r.get('rule_id','')}".strip()
