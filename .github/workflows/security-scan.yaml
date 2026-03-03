@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   scan:
-    name: Security Scan (Semgrep + Trivy)
+    name: Security Scan (Semgrep + Trivy + Custom)
     runs-on: ubuntu-latest
 
     steps:
@@ -37,14 +37,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install semgrep reportlab PyPDF2
 
-      # --- SEMGREP ---
+      # --- SEMGREP (exclui scripts/) ---
       - name: Run Semgrep (JSON)
-        run: semgrep scan --config auto --json --output semgrep.json || true
+        run: semgrep scan --config auto --exclude scripts --json --output semgrep.json || true
 
       - name: Run Semgrep (SARIF)
-        run: semgrep scan --config auto --sarif --output semgrep.sarif || true
+        run: semgrep scan --config auto --exclude scripts --sarif --output semgrep.sarif || true
 
-      - name: Convert JSON to CSV
+      - name: Convert Semgrep JSON to CSV
         run: |
           jq -r '
             ["Rule ID","Severity","File","Line","Message"],
@@ -57,7 +57,7 @@ jobs:
             ]) | @csv
           ' semgrep.json > semgrep.csv
 
-      - name: Build flat JSON
+      - name: Build flat JSON (semgrep.report.json)
         run: |
           jq '{
             results: [
@@ -77,18 +77,14 @@ jobs:
         with:
           sarif_file: semgrep.sarif
 
-      # --- TRIVY: Build image opcional ---
-      - name: Build Docker image (if Dockerfile exists)
+      # --- TRIVY: Image (somente se houver Dockerfile) ---
+      - name: Build Docker image
+        if: ${{ hashFiles('Dockerfile') != '' }}
         run: |
-          if [ -f Dockerfile ]; then
-            docker build -t local/test-insecure:${{ github.sha }} .
-          else
-            echo "No Dockerfile at $PWD, skipping image build."
-          fi
+          docker build -t local/test-insecure:${{ github.sha }} .
 
-      # Opção recomendada: ação oficial do Trivy para imagem
-      - name: Trivy Image scan (if Dockerfile exists)
-        if: ${{ !cancelled() && !failure() && hashFiles('Dockerfile') != '' }}
+      - name: Trivy Image scan (SARIF)
+        if: ${{ hashFiles('Dockerfile') != '' }}
         uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: local/test-insecure:${{ github.sha }}
@@ -114,8 +110,12 @@ jobs:
           sarif_file: trivy-image.sarif
         continue-on-error: true
 
-      # --- (Opcional) Trivy FS para repositório ---
-      - name: Trivy FS scan (repo)
+      # --- TRIVY: FS (cria .trivyignore para ignorar scripts/) ---
+      - name: Create .trivyignore (ignore scripts/)
+        run: |
+          echo "scripts/" >> .trivyignore
+
+      - name: Trivy FS scan (repo -> SARIF)
         uses: aquasecurity/trivy-action@0.24.0
         with:
           scan-type: 'fs'
@@ -135,7 +135,7 @@ jobs:
         continue-on-error: true
 
       # =========================
-      # CUSTOM SECURITY REVIEW (scripts no repo local)
+      # CUSTOM SECURITY REVIEW (exclui scripts/)
       # =========================
       - name: Run custom security review (FS)
         run: |
@@ -143,7 +143,8 @@ jobs:
             --root . \
             --json-out custom-review.json \
             --sarif-out custom-review.sarif \
-            #--fail-on HIGH
+            --csv-out custom-review.csv \
+            --exclude-dirs ".git,.hg,.svn,.tox,.mypy_cache,.pytest_cache,node_modules,dist,build,out,.venv,venv,__pycache__,.next,.nuxt,.yarn,.pnpm-store,coverage,scripts"
 
       - name: Upload Custom Review SARIF
         if: ${{ hashFiles('custom-review.sarif') != '' }}
@@ -151,14 +152,16 @@ jobs:
         with:
           sarif_file: custom-review.sarif
 
-      - name: Upload Custom Review JSON
-        if: ${{ hashFiles('custom-review.json') != '' }}
+      - name: Upload Custom Review JSON/CSV
         uses: actions/upload-artifact@v4
         with:
           name: custom-review
-          path: custom-review.json
+          path: |
+            custom-review.json
+            custom-review.csv
+          if-no-files-found: ignore
 
-      # --- Relatório PDF ---
+      # --- Relatório PDF (inclui Semgrep + Trivy Image/FS + Custom) ---
       - name: Generate PDF Security Report (Corporate)
         run: python ./scripts/generate_report.py
 
@@ -171,9 +174,10 @@ jobs:
             semgrep.csv
             semgrep.report.json
             semgrep.sarif
-            custom-review.json
-            custom-review.sarif
             trivy-image.sarif
             trivy-fs.sarif
+            custom-review.json
+            custom-review.sarif
+            custom-review.csv
             security-report.pdf
           if-no-files-found: ignore
