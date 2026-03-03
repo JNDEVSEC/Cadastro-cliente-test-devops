@@ -141,7 +141,7 @@ jobs:
 
       - name: Run custom security review (FS)
         run: |
-          python .security-templates/scripts/security_review.py \
+          python ./scripts/security_review.py \
             --root . \
             --json-out custom-review.json \
             --sarif-out custom-review.sarif \
