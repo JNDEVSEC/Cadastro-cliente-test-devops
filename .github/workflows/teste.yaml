@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   security:
-    uses: JNDEVSEC/security-templates/.github/workflows/security_scan.yaml@main
+    uses: JNDEVSEC/security-templates/.github/workflows/security_scan.yml@v1.0.0
     secrets: inherit
     with:
       project-path: '.'
