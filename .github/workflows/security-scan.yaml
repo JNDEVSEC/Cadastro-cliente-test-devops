@@ -77,20 +77,70 @@ jobs:
           sarif_file: semgrep.sarif
 
       # --- TRIVY ---
-      - name: Run Trivy (filesystem, JSON)
-        uses: aquasecurity/trivy-action@0.33.1
+      - name: Build Docker image (if Dockerfile exists)
+        run: |
+          if [ -f Dockerfile ]; then
+            docker build -t local/test-insecure:${{ github.sha }} .
+          else
+            echo "No Dockerfile at $PWD, skipping image build."
+          fi
+
+      - name: Trivy Image (if image exists)
+        run: |
+          if docker image inspect local/test-insecure:${{ github.sha }} >/dev/null 2>&1; then
+            echo "Scanning built image..."
+            trivy image --format sarif --output trivy-image.sarif \
+                        --severity CRITICAL,HIGH,MEDIUM,LOW \
+                        local/test-insecure:${{ github.sha }}
+          else
+            echo "Image not found. Skipping Trivy image scan."
+          fi
+
+      - name: Upload Trivy Image SARIF (if exists)
+        uses: actions/upload-artifact@v4
         with:
-          scan-type: fs
-          scan-ref: .
-          format: json
-          output: trivy-results.json
-          severity: CRITICAL,HIGH
-          # Se quiser falhar quando houver achados críticos/altos:
-          # exit-code: '1'
+          name: trivy-image-sarif
+          path: trivy-image.sarif
+          if-no-files-found: ignore
+
+      - name: Upload Trivy Image SARIF to Code Scanning (if exists)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image.sarif
+        continue-on-error: true
+
+       # =========================
+      # CUSTOM SECURITY REVIEW (script do seu template)
+      # =========================
+      - name: Checkout security templates (tools)
+        uses: actions/checkout@v4
+        with:
+          repository: JNDEVSEC/security-templates
+          ref: v1
+          path: .security-templates
+
+      - name: Run custom security review (FS)
+        run: |
+          python .scripts/security_review.py \
+            --root . \
+            --json-out custom-review.json \
+            --sarif-out custom-review.sarif \
+            --fail-on HIGH
+
+      - name: Upload Custom Review SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: custom-review.sarif
+
+      - name: Upload Custom Review JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-review
+          path: custom-review.json
 
       # --- Relatório PDF ---
       - name: Generate PDF Security Report (Corporate)
-        run: python generate_report.py
+        run: python .scripts/generate_report.py
 
       - name: Upload all reports
         uses: actions/upload-artifact@v4
