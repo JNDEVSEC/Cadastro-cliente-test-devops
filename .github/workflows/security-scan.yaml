@@ -1,0 +1,183 @@
+name: Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      project-path:
+        required: false
+        default: '.'
+        type: string
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.project-path }}
+        shell: bash
+
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install reportlab PyPDF2 semgrep
+
+      # =========================
+      # SEMGREP
+      # =========================
+      - name: Run Semgrep JSON
+        run: semgrep scan --config auto --json --output semgrep.json || true
+
+      - name: Run Semgrep SARIF
+        run: semgrep scan --config auto --sarif --output semgrep.sarif || true
+
+      - name: Convert JSON to CSV
+        run: |
+          jq -r '
+            ["Rule ID","Severity","File","Line","Message"],
+            (.results[]? | [
+              .check_id,
+              .extra.severity,
+              .path,
+              .start.line,
+              .extra.message
+            ]) | @csv
+          ' semgrep.json > semgrep.csv
+
+      - name: Build flat JSON
+        run: |
+          jq '{
+            results: [
+              .results[]? | {
+                rule_id: .check_id,
+                severity: .extra.severity,
+                file: .path,
+                line: .start.line,
+                message: .extra.message
+              }
+            ]
+          }' semgrep.json > semgrep.report.json
+
+      - name: Upload Semgrep SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: semgrep.sarif
+
+      # =========================
+      # TRIVY - FILESYSTEM (inclui secrets explicitamente)
+      # =========================
+      - name: "Run Trivy (filesystem: vuln + secrets + misconfig)"
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: trivy-results.json
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+        env:
+          TRIVY_SCANNERS: vuln,secret,misconfig
+
+      # =========================
+      # DOCKER BUILD + TRIVY IMAGE (vuln + secrets)
+      # =========================
+      - name: Build Docker image (if Dockerfile exists)
+        run: |
+          if [ -f Dockerfile ]; then
+            docker build -t local/test-insecure:${{ github.sha }} .
+          else
+            echo "No Dockerfile at $PWD, skipping image build."
+          fi
+
+      - name: Trivy Image (if image exists)
+        run: |
+          if docker image inspect local/test-insecure:${{ github.sha }} >/dev/null 2>&1; then
+            echo "Scanning built image..."
+            trivy image --format sarif --output trivy-image.sarif \
+                        --severity CRITICAL,HIGH,MEDIUM,LOW \
+                        local/test-insecure:${{ github.sha }}
+          else
+            echo "Image not found. Skipping Trivy image scan."
+          fi
+
+      - name: Upload Trivy Image SARIF (if exists)
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-sarif
+          path: trivy-image.sarif
+          if-no-files-found: ignore
+
+      - name: Upload Trivy Image SARIF to Code Scanning (if exists)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image.sarif
+        continue-on-error: true
+
+      # =========================
+      # CUSTOM SECURITY REVIEW (script do seu template)
+      # =========================
+      - name: Checkout security templates (tools)
+        uses: actions/checkout@v4
+        with:
+          repository: JNDEVSEC/security-templates
+          ref: v1
+          path: .security-templates
+
+      - name: Run custom security review (FS)
+        run: |
+          python .security-templates/scripts/security_review.py \
+            --root . \
+            --json-out custom-review.json \
+            --sarif-out custom-review.sarif \
+            --fail-on HIGH
+
+      - name: Upload Custom Review SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: custom-review.sarif
+
+      - name: Upload Custom Review JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-review
+          path: custom-review.json
+
+      # =========================
+      # PDF (usa o script do repositório analisado)
+      # =========================
+      - name: Generate PDF Report
+        run: python scripts/generate_report.py
+
+      # =========================
+      # Artefatos
+      # =========================
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            semgrep.json
+            semgrep.csv
+            semgrep.report.json
+            semgrep.sarif
+            trivy-results.json
+            trivy-image.sarif
+            custom-review.json
+            custom-review.sarif
+            security-report.pdf
