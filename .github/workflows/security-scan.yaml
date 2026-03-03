@@ -72,11 +72,12 @@ jobs:
           }' semgrep.json > semgrep.report.json
 
       - name: Upload Semgrep SARIF
+        if: ${{ hashFiles('semgrep.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: semgrep.sarif
 
-      # --- TRIVY ---
+      # --- TRIVY: Build image opcional ---
       - name: Build Docker image (if Dockerfile exists)
         run: |
           if [ -f Dockerfile ]; then
@@ -85,54 +86,73 @@ jobs:
             echo "No Dockerfile at $PWD, skipping image build."
           fi
 
-      - name: Trivy Image (if image exists)
-        run: |
-          if docker image inspect local/test-insecure:${{ github.sha }} >/dev/null 2>&1; then
-            echo "Scanning built image..."
-            trivy image --format sarif --output trivy-image.sarif \
-                        --severity CRITICAL,HIGH,MEDIUM,LOW \
-                        local/test-insecure:${{ github.sha }}
-          else
-            echo "Image not found. Skipping Trivy image scan."
-          fi
+      # Opção recomendada: ação oficial do Trivy para imagem
+      - name: Trivy Image scan (if Dockerfile exists)
+        if: ${{ !cancelled() && !failure() && hashFiles('Dockerfile') != '' }}
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: local/test-insecure:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-image.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+          ignore-unfixed: true
+          exit-code: '0'
+        continue-on-error: true
 
-      - name: Upload Trivy Image SARIF (if exists)
+      - name: Upload Trivy Image SARIF (artifact)
+        if: ${{ hashFiles('trivy-image.sarif') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: trivy-image-sarif
           path: trivy-image.sarif
           if-no-files-found: ignore
 
-      - name: Upload Trivy Image SARIF to Code Scanning (if exists)
+      - name: Upload Trivy Image SARIF to Code Scanning
+        if: ${{ hashFiles('trivy-image.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-image.sarif
         continue-on-error: true
 
-       # =========================
-      # CUSTOM SECURITY REVIEW (script do seu template)
-      # =========================
-      - name: Checkout security templates (tools)
-        uses: actions/checkout@v4
+      # --- (Opcional) Trivy FS para repositório ---
+      - name: Trivy FS scan (repo)
+        uses: aquasecurity/trivy-action@0.24.0
         with:
-          repository: JNDEVSEC/security-templates
-          ref: v1
-          path: .security-templates
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+          ignore-unfixed: true
+          exit-code: '0'
+        continue-on-error: true
 
+      - name: Upload Trivy FS SARIF
+        if: ${{ hashFiles('trivy-fs.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-fs.sarif
+        continue-on-error: true
+
+      # =========================
+      # CUSTOM SECURITY REVIEW (scripts no repo local)
+      # =========================
       - name: Run custom security review (FS)
         run: |
-          python .scripts/security_review.py \
+          python ./scripts/security_review.py \
             --root . \
             --json-out custom-review.json \
             --sarif-out custom-review.sarif \
             --fail-on HIGH
 
       - name: Upload Custom Review SARIF
+        if: ${{ hashFiles('custom-review.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: custom-review.sarif
 
       - name: Upload Custom Review JSON
+        if: ${{ hashFiles('custom-review.json') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: custom-review
@@ -140,7 +160,7 @@ jobs:
 
       # --- Relatório PDF ---
       - name: Generate PDF Security Report (Corporate)
-        run: python .scripts/generate_report.py
+        run: python ./scripts/generate_report.py
 
       - name: Upload all reports
         uses: actions/upload-artifact@v4
@@ -151,5 +171,9 @@ jobs:
             semgrep.csv
             semgrep.report.json
             semgrep.sarif
-            trivy-results.json
+            custom-review.json
+            custom-review.sarif
+            trivy-image.sarif
+            trivy-fs.sarif
             security-report.pdf
+          if-no-files-found: ignore
