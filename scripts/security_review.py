@@ -2,23 +2,23 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import csv
 import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
-from typing import Dict, List, Tuple, Iterable
+from typing import Dict, List, Iterable
 
 # -----------------------
-# Configuração principal
+# Configuração principal (defaults)
 # -----------------------
 DEFAULT_EXTS = [".py", ".js", ".php", ".java", ".ts", ".jsx", ".tsx"]
-SKIP_DIRS = {
+DEFAULT_SKIP_DIRS = {
     ".git", ".hg", ".svn", ".tox", ".mypy_cache", ".pytest_cache",
     "node_modules", "dist", "build", "out", ".venv", "venv", "__pycache__",
     ".next", ".nuxt", ".yarn", ".pnpm-store", "coverage"
 }
-MAX_BYTES = 1_000_000  # 1 MB por arquivo (ajuste se necessário)
+DEFAULT_MAX_BYTES = 1_000_000  # 1 MB por arquivo (ajuste se necessário)
 
 # Severidade -> nível SARIF
 SEV_TO_SARIF = {
@@ -30,8 +30,7 @@ SEV_TO_SARIF = {
 }
 
 # -----------------------
-# Regras (ID, nome, regex, severidade, extensões)
-# Repare que removi duplicidades e corrigi &lt; &gt; &amp;
+# Regras (ID, nome, regex, severidade)
 # -----------------------
 RULES = [
     # Exposição/segredos
@@ -77,12 +76,13 @@ RULES = [
     {"id": "SRV-080", "name": "paths sensíveis expostos (menção)", "re": r"(/admin|/config|/backup|/private|/usuario(s)?|/cliente(s)?|/produto(s)?|/pedidos?|/ordem(s)?|/comiss(o|õ)es?|/acesso|/painel|/controllers|/css|/dist|/img(s)?|/plugins)", "sev": "INFO"},
 ]
 
-# Compila regex
+# Compila regex uma vez
 for r in RULES:
     r["rx"] = re.compile(r["re"], re.IGNORECASE)
 
 # Severidades ordenadas para gate
 SEV_ORDER = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
 def sev_gte(a: str, b: str) -> bool:
     return SEV_ORDER.index(a) >= SEV_ORDER.index(b)
 
@@ -96,16 +96,16 @@ def is_text_file(path: str, limit: int = 8192) -> bool:
     except Exception:
         return False
 
-def should_skip(path: str) -> bool:
+def should_skip(path: str, skip_dirs: Iterable[str]) -> bool:
     parts = set(os.path.normpath(path).split(os.sep))
-    return any(d in parts for d in SKIP_DIRS)
+    return any(d in parts for d in skip_dirs)
 
-def scan_file(path: str) -> List[Dict]:
+def scan_file(path: str, rules: List[Dict], max_bytes: int) -> List[Dict]:
     findings: List[Dict] = []
     if not is_text_file(path):
         return findings
     try:
-        if os.path.getsize(path) > MAX_BYTES:
+        if os.path.getsize(path) > max_bytes:
             return findings
     except OSError:
         return findings
@@ -127,15 +127,15 @@ def scan_file(path: str) -> List[Dict]:
 
     for idx, line in enumerate(lines, start=1):
         l = line.strip()
-        for r in RULES:
-            if r["rx"].search(line):
+        for rr in rules:
+            if rr["rx"].search(line):
                 findings.append({
-                    "rule_id": r["id"],
-                    "title": r["name"],
-                    "severity": r["sev"],
+                    "rule_id": rr["id"],
+                    "title": rr["name"],
+                    "severity": rr["sev"],
                     "file": path,
                     "line": idx,
-                    "message": f"Possível ocorrência: {r['name']}",
+                    "message": f"Possível ocorrência: {rr['name']}",
                     "snippet": l[:300],
                 })
     # Heurística: rotas sem autenticação (python)
@@ -174,16 +174,18 @@ def detect_unauthenticated_routes(lines: List[str], path: str) -> List[Dict]:
                 })
     return out
 
-def walk_files(root: str, exts: Iterable[str]) -> Iterable[str]:
+def walk_files(root: str, exts: Iterable[str], skip_dirs: Iterable[str]) -> Iterable[str]:
     exts = tuple(exts)
+    skip_dirs = set(skip_dirs)
     for r, dirs, files in os.walk(root):
         # remove dirs ignorados in-place para evitar descer
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
         for f in files:
-            if should_skip(os.path.join(r, f)):
+            full = os.path.join(r, f)
+            if should_skip(full, skip_dirs):
                 continue
             if f.lower().endswith(exts):
-                yield os.path.join(r, f)
+                yield full
 
 def summarize(findings: List[Dict]) -> Dict[str, int]:
     counts = {k: 0 for k in SEV_ORDER}
@@ -239,25 +241,41 @@ def to_sarif(findings: List[Dict]) -> Dict:
     }
     return sarif
 
+def write_csv(findings: List[Dict], csv_path: str) -> None:
+    """Escreve CSV com colunas: Rule ID, Severity, File, Line, Message, Snippet"""
+    fieldnames = ["Rule ID", "Severity", "File", "Line", "Message", "Snippet"]
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for it in findings:
+            w.writerow({
+                "Rule ID": it.get("rule_id", ""),
+                "Severity": it.get("severity", ""),
+                "File": it.get("file", ""),
+                "Line": it.get("line", ""),
+                "Message": it.get("message", ""),
+                "Snippet": it.get("snippet", ""),
+            })
+
 def main():
     ap = argparse.ArgumentParser("custom_security_review")
     ap.add_argument("--root", default=".", help="Diretório raiz do projeto")
     ap.add_argument("--json-out", default="custom-review.json", help="Arquivo JSON de saída")
     ap.add_argument("--sarif-out", default="custom-review.sarif", help="Arquivo SARIF 2.1.0 de saída")
-    ap.add_argument("--max-bytes", type=int, default=MAX_BYTES, help="Tamanho máximo por arquivo")
+    ap.add_argument("--csv-out", default=None, help="Arquivo CSV de saída (opcional)")
+    ap.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES, help="Tamanho máximo por arquivo")
     ap.add_argument("--include-extensions", default=",".join(DEFAULT_EXTS), help="Extensões que serão analisadas (csv)")
-    ap.add_argument("--exclude-dirs", default=",".join(sorted(SKIP_DIRS)), help="Pastas a ignorar (csv)")
+    ap.add_argument("--exclude-dirs", default=",".join(sorted(DEFAULT_SKIP_DIRS)), help="Pastas a ignorar (csv)")
     ap.add_argument("--fail-on", choices=SEV_ORDER, help="Falha (exit 1) se houver achados >= severidade informada")
     args = ap.parse_args()
 
-    global SKIP_DIRS, MAX_BYTES
-    MAX_BYTES = int(args.max_bytes)
+    max_bytes = int(args.max_bytes)
     exts = [e.strip().lower() for e in args.include_extensions.split(",") if e.strip()]
-    SKIP_DIRS = set([d.strip() for d in args.exclude_dirs.split(",") if d.strip()])
+    skip_dirs = set([d.strip() for d in args.exclude_dirs.split(",") if d.strip()])
 
     all_findings: List[Dict] = []
-    for p in walk_files(args.root, exts):
-        all_findings.extend(scan_file(p))
+    for p in walk_files(args.root, exts, skip_dirs):
+        all_findings.extend(scan_file(p, RULES, max_bytes))
     all_findings = dedup(all_findings)
 
     # Saídas
@@ -266,6 +284,9 @@ def main():
 
     with open(args.sarif_out, "w", encoding="utf-8") as fsr:
         json.dump(to_sarif(all_findings), fsr, ensure_ascii=False, indent=2)
+
+    if args.csv_out:
+        write_csv(all_findings, args.csv_out)
 
     counts = summarize(all_findings)
     total = sum(counts.values())
@@ -278,3 +299,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+``
