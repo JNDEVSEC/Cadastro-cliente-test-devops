@@ -1,4 +1,4 @@
-name: Security Scan
+name: Teste – Security Scan
 
 on:
   push:
@@ -13,5 +13,9 @@ permissions:
 
 jobs:
   security:
-    uses: JNDEVSEC/security-templates/.github/workflows/security-scan.yml@v1
+    # Use o caminho exato do arquivo e uma ref existente (main ou sua tag)
+    uses: JNDEVSEC/security-templates/.github/workflows/security_scan.yaml@main
     secrets: inherit
+    with:
+      # Se for monorepo, aponte a subpasta; para raiz, use '.'
+      project-path: '.'
