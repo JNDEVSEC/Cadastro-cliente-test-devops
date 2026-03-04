@@ -240,7 +240,7 @@ jobs:
       - name: Generate PDF Security Report (Corporate)
         # opcional: personalize sua marca via env
         # env:
-        #   COMPANY_NAME: "Sua Empresa S.A."
+        #   COMPANY_NAME: "JN DEVSEC"
         #   REPORT_TITLE: "Relatório de Segurança — CI/CD"
         #   LOGO_PATH: "./assets/logo.png"
         run: python ./scripts/generate_report.py
