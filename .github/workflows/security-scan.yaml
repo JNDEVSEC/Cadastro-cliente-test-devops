@@ -35,7 +35,8 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install semgrep reportlab PyPDF2
+          # matplotlib requerido pelo generate_report.py (gráficos)
+          pip install semgrep reportlab PyPDF2 matplotlib
 
       # --- SEMGREP (exclui scripts/) ---
       - name: Run Semgrep (JSON)
@@ -76,15 +77,40 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: semgrep.sarif
+          category: sast-semgrep
 
-      # --- TRIVY: Image (somente se houver Dockerfile) ---
-      - name: Build Docker image
-        if: ${{ hashFiles('Dockerfile') != '' }}
+      # --- TRIVY: Detecta Dockerfile e faz build (best-effort) ---
+      - name: Detect Dockerfile path
+        id: dfile
+        shell: bash
         run: |
-          docker build -t local/test-insecure:${{ github.sha }} .
+          FILE=$(git ls-files | grep -E '(^|/)[Dd]ockerfile([.-].*)?$' | head -n 1 || true)
+          if [ -n "$FILE" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "path=$FILE" >> "$GITHUB_OUTPUT"
+            echo "Found Dockerfile at: $FILE"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "path=" >> "$GITHUB_OUTPUT"
+            echo "No Dockerfile found"
+          fi
 
+      - name: Build Docker image (best-effort)
+        if: ${{ steps.dfile.outputs.found == 'true' }}
+        id: buildimg
+        shell: bash
+        continue-on-error: true
+        run: |
+          if docker build -f "${{ steps.dfile.outputs.path }}" -t local/test-insecure:${{ github.sha }} .; then
+            echo "succeeded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Build falhou, continuando pipeline (scan de imagem será pulado)."
+            echo "succeeded=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --- TRIVY: Image (só se o build suceder) ---
       - name: Trivy Image scan (SARIF)
-        if: ${{ hashFiles('Dockerfile') != '' }}
+        if: ${{ steps.dfile.outputs.found == 'true' && steps.buildimg.outputs.succeeded == 'true' }}
         uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: local/test-insecure:${{ github.sha }}
@@ -108,6 +134,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-image.sarif
+          category: sca-trivy-image
         continue-on-error: true
 
       # --- TRIVY: FS (cria .trivyignore para ignorar scripts/) ---
@@ -132,6 +159,28 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-fs.sarif
+          category: sca-trivy-fs
+        continue-on-error: true
+
+      # --- TRIVY: Config (IaC: Dockerfile/Compose) ---
+      - name: Trivy Config scan (Dockerfile/IaC -> SARIF)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-config.sarif'
+          ignore-unfixed: true
+          exit-code: '0'
+          scanners: 'config,secret'
+        continue-on-error: true
+
+      - name: Upload Trivy Config SARIF
+        if: ${{ hashFiles('trivy-config.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-config.sarif
+          category: iac-trivy-config
         continue-on-error: true
 
       # =========================
@@ -151,6 +200,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: custom-review.sarif
+          category: sast-custom
 
       - name: Upload Custom Review JSON/CSV
         uses: actions/upload-artifact@v4
@@ -161,8 +211,13 @@ jobs:
             custom-review.csv
           if-no-files-found: ignore
 
-      # --- Relatório PDF (tópicos; Semgrep + Trivy Image/FS + Custom) ---
+      # --- Relatório PDF (corporate) ---
       - name: Generate PDF Security Report (Corporate)
+        # opcional: personalize sua marca via env
+        # env:
+        #   COMPANY_NAME: "Sua Empresa S.A."
+        #   REPORT_TITLE: "Relatório de Segurança — CI/CD"
+        #   LOGO_PATH: "./assets/logo.png"
         run: python ./scripts/generate_report.py
 
       - name: Upload all reports
@@ -176,6 +231,7 @@ jobs:
             semgrep.sarif
             trivy-image.sarif
             trivy-fs.sarif
+            trivy-config.sarif
             custom-review.json
             custom-review.sarif
             custom-review.csv
