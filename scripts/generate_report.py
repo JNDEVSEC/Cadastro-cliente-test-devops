@@ -1,567 +1,943 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Custom Security Review (enhanced)
-- Para cada achado, inclui: vulnerabilidade explorável (descrição), risco e correção sugerida.
-- Adiciona metadados (CWE, referências) no JSON e SARIF (help markdown), e colunas extras no CSV.
-"""
-
-import argparse
-import csv
 import json
 import os
 import re
-import sys
-from typing import Dict, List, Iterable
+from datetime import datetime, timezone
+from math import isfinite
 
-# -----------------------
-# Configuração principal (defaults)
-# -----------------------
-DEFAULT_EXTS = [".py", ".js", ".php", ".java", ".ts", ".jsx", ".tsx"]
-DEFAULT_SKIP_DIRS = {
-    ".git", ".hg", ".svn", ".tox", ".mypy_cache", ".pytest_cache",
-    "node_modules", "dist", "build", "out", ".venv", "venv", "__pycache__",
-    ".next", ".nuxt", ".yarn", ".pnpm-store", "coverage", "scripts"  # scripts opcional
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
+
+from reportlab.graphics.shapes import Drawing, String, Rect
+from reportlab.graphics import renderPDF
+from reportlab.graphics.charts.barcharts import VerticalBarChart
+from reportlab.graphics.charts.legends import Legend
+
+# ========== CONFIG EXECUTIVA & TEMA ==========
+ORG_NAME = os.getenv("ORG_NAME", "Sua Empresa")
+TITLE    = os.getenv("REPORT_TITLE", "Relatório Executivo de Segurança")
+DATE_STR = datetime.now(timezone.utc).strftime("%d/%m/%Y")
+
+PAGE_W, PAGE_H = A4
+MARGIN_L = 18 * mm
+MARGIN_R = 18 * mm
+MARGIN_T = 18 * mm
+MARGIN_B = 16 * mm
+CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R
+
+# Tipografia
+FONT_XS = 8.5
+FONT_S  = 9.0
+FONT_M  = 10.0
+FONT_L  = 12.0
+FONT_H  = 16.0
+LINE_H  = 12.0
+
+SEV_ORDER = ["CRITICAL","HIGH","MEDIUM","LOW","INFO","UNKNOWN"]
+
+# Paleta
+SEV_COLORS = {
+    "CRITICAL": colors.Color(0.85, 0.10, 0.10, alpha=1),
+    "HIGH":     colors.HexColor("#ea580c"),
+    "MEDIUM":   colors.HexColor("#f97316"),
+    "LOW":      colors.HexColor("#fed7aa"),
+    "INFO":     colors.Color(0.55, 0.60, 0.70),
+    "UNKNOWN":  colors.Color(0.60, 0.60, 0.60),
 }
-DEFAULT_MAX_BYTES = 1_000_000  # 1 MB por arquivo
+ORANGE_PRIMARY  = colors.HexColor("#f97316")
+ORANGE_DARK     = colors.HexColor("#ea580c")
+ORANGE_LIGHT_BG = colors.HexColor("#fff7ed")
 
-# Severidade -> nível SARIF
-SEV_TO_SARIF = {
-    "CRITICAL": "error",
-    "HIGH": "error",
-    "MEDIUM": "warning",
-    "LOW": "note",
-    "INFO": "note",
-}
+# =========================================================
+# UTILITÁRIAS
+# =========================================================
+def wrap_lines(c, text, width, font="Helvetica", size=FONT_S):
+    c.setFont(font, size)
+    text = (text or "").strip()
+    if not text:
+        return [""]
+    lines = []
+    current = ""
+    def flush_current():
+        nonlocal current
+        if current:
+            lines.append(current.rstrip())
+            current = ""
+    for word in text.split():
+        if c.stringWidth(word, font, size) <= width:
+            test = (current + " " + word).strip()
+            if c.stringWidth(test, font, size) <= width:
+                current = test
+            else:
+                flush_current()
+                current = word
+        else:
+            if current:
+                flush_current()
+            chunk = ""
+            for ch in word:
+                test = chunk + ch
+                if c.stringWidth(test, font, size) <= width:
+                    chunk = test
+                else:
+                    if chunk:
+                        lines.append(chunk)
+                    chunk = ch
+            if chunk:
+                current = chunk
+    flush_current()
+    return lines
 
-# Ordem de severidades
-SEV_ORDER = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+def draw_bullet_paragraph(c, x, y, text, max_width, bullet="• ", font="Helvetica", size=FONT_S):
+    c.setFont(font, size)
+    bullet_w = c.stringWidth(bullet, font, size)
+    lines = wrap_lines(c, text, max_width - bullet_w, font=font, size=size)
+    c.drawString(x, y, bullet + (lines[0] if lines else ""))
+    y -= LINE_H
+    cont_x = x + bullet_w
+    for ln in lines[1:]:
+        c.drawString(cont_x, y, ln)
+        y -= LINE_H
+    return y
 
-def sev_gte(a: str, b: str) -> bool:
-    return SEV_ORDER.index(a) >= SEV_ORDER.index(b)
-
-# -----------------------
-# Regras (ID, nome, regex, severidade)
-# -----------------------
-RULES = [
-    # Exposição/segredos
-    {"id": "SRV-001", "name": "hardcoded api key", "re": r"(api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*['\"][A-Za-z0-9_\-]{16,}['\"]", "sev": "CRITICAL"},
-    {"id": "SRV-002", "name": "hardcoded certificado/chave privada", "re": r"(BEGIN CERTIFICATE|BEGIN RSA PRIVATE KEY|BEGIN PRIVATE KEY)", "sev": "CRITICAL"},
-    {"id": "SRV-003", "name": "atribuição de chave/segredo", "re": r"\b(SECRET_KEY|API_KEY|TOKEN|PASSWORD|DB_PASS|ACCESS_KEY)\b\s*=\s*['\"][^'\"]{4,}['\"]", "sev": "HIGH"},
-    {"id": "SRV-004", "name": "variável sensível vazia/nula", "re": r"\b(SECRET_KEY|API_KEY|TOKEN|PASSWORD|DB_PASS|ACCESS_KEY)\b\s*=\s*([\"']{2}|null|None)", "sev": "MEDIUM"},
-
-    # Autenticação/autorização
-    {"id": "SRV-010", "name": "redirect aberto", "re": r"redirect\((request\.GET|url)\)", "sev": "HIGH"},
-    {"id": "SRV-011", "name": "uso direto de parâmetro do request", "re": r"(request\.GET|request\.POST|\$_GET|\$_POST)", "sev": "LOW"},
-
-    # Criptografia/algoritmos
-    {"id": "SRV-020", "name": "uso de hash/algoritmo inseguro", "re": r"\b(md5|sha1|rot13|crc32)\b\s*\(", "sev": "HIGH"},
-    {"id": "SRV-021", "name": "base64 tratado como criptografia", "re": r"\bbase64\b\s*\(", "sev": "MEDIUM"},
-    {"id": "SRV-022", "name": "criptografia fraca por fórmula", "re": r"\b(pass|key|token|secret)\b\s*=\s*\w+\s*[\+\-\*/\^%]\s*\w+", "sev": "MEDIUM"},
-
-    # Injeções / Execução
-    {"id": "SRV-030", "name": "sql injection (heurístico)", "re": r"SELECT\s+\*\s+FROM\s+\w+\s+WHERE\s+\w+\s*=\s*(['\"]?\s*\.\s*\$?\w+\s*\.\s*['\"]?|['\"]\s*\$?\w+\s*['\"])", "sev": "HIGH"},
-    {"id": "SRV-031", "name": "uso de eval/exec", "re": r"\b(eval|exec|Function)\s*\(", "sev": "HIGH"},
-    {"id": "SRV-032", "name": "execução de comando do SO", "re": r"(os\.system|subprocess\.Popen|Runtime\.getRuntime\(\)\.exec)", "sev": "HIGH"},
-    {"id": "SRV-033", "name": "comando concatenado", "re": r"(exec\s*\(\s*\".*\"\s*\+\s*\w+)", "sev": "MEDIUM"},
-
-    # Entrada/arquivos/rede
-    {"id": "SRV-040", "name": "leitura de arquivo sem validação", "re": r"(open\s*\(|fs\.readFile\s*\(|FileReader\s*\()", "sev": "LOW"},
-    {"id": "SRV-041", "name": "upload sem restrição", "re": r"(move_uploaded_file|file\.upload|req\.files)", "sev": "HIGH"},
-    {"id": "SRV-042", "name": "listagem de diretório", "re": r"(os\.listdir|readdir\s*\(|\bdir\s*\()", "sev": "LOW"},
-
-    # HTTP/Headers/Sessão
-    {"id": "SRV-050", "name": "session.cookie_secure=False", "re": r"session\.cookie_secure\s*=\s*False", "sev": "HIGH"},
-    {"id": "SRV-051", "name": "header de segurança ausente (menção)", "re": r"(X-Frame-Options|Content-Security-Policy)", "sev": "INFO"},
-    {"id": "SRV-052", "name": "desativação de verificação SSL", "re": r"(verify\s*=\s*False|ssl\.verify\s*=\s*False)", "sev": "HIGH"},
-
-    # XSS
-    {"id": "SRV-060", "name": "XSS (dangerous sink)", "re": r"(document\.write|innerHTML\s*=|<script>|onerror\s*=|onload\s*=|dangerouslySetInnerHTML)", "sev": "HIGH"},
-
-    # Qualidade/Práticas
-    {"id": "SRV-070", "name": "exceção genérica", "re": r"(except\s+Exception\b|catch\s*\(Exception\b)", "sev": "LOW"},
-    {"id": "SRV-071", "name": "debug ativo", "re": r"(debug\s*=\s*True|console\.log|print\s*\()", "sev": "LOW"},
-    {"id": "SRV-072", "name": "comentário com senha/secret", "re": r"(#.*senha|//.*password|/\*.*secret)", "sev": "LOW"},
-
-    # Caminhos sensíveis
-    {"id": "SRV-080", "name": "paths sensíveis expostos (menção)", "re": r"(/admin|/config|/backup|/private|/usuario(s)?|/cliente(s)?|/produto(s)?|/pedidos?|/ordem(s)?|/comiss(o|õ)es?|/acesso|/painel|/controllers|/css|/dist|/img(s)?|/plugins)", "sev": "INFO"},
-
-    # Rotas (heurística Python)
-    {"id": "SRV-090", "name": "rota sem autenticação (heurístico)", "re": r"", "sev": "HIGH"},
-]
-
-# Metadados por regra: CWE, vulnerabilidade explorável (descrição), risco, correção e referências
-RULE_META: Dict[str, Dict] = {
-    "SRV-001": {
-        "cwe": ["CWE-798"],
-        "vulnerability": "Credenciais/API Keys hardcoded expostas no código",
-        "risk": "Exposição de segredos permite acesso não autorizado a serviços e dados (account/service takeover).",
-        "remediation": "Remover credenciais do código. Usar secret manager/variáveis de ambiente; rotacionar as chaves comprometidas; configurar CI/CD para injetar segredos em runtime.",
-        "references": [
-            "https://cwe.mitre.org/data/definitions/798.html",
-            "https://owasp.org/www-project-top-ten/2017/A3-Sensitive_Data_Exposure"
-        ],
-    },
-    "SRV-002": {
-        "cwe": ["CWE-321"],
-        "vulnerability": "Chave privada/certificado embutido no repositório",
-        "risk": "Permite impersonation, MITM e decriptação/tráfego forjado; comprometimento de infraestrutura.",
-        "remediation": "Nunca commit ar chaves/certs. Armazenar em vault; usar certificados dinâmicos/KMS; rotacionar imediatamente o par comprometido.",
-        "references": [
-            "https://cwe.mitre.org/data/definitions/321.html",
-            "https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html"
-        ],
-    },
-    "SRV-003": {
-        "cwe": ["CWE-798", "CWE-312"],
-        "vulnerability": "Atribuição de segredo sensível em texto plano",
-        "risk": "Vazamento acidental via VCS, logs ou pacotes; acesso não autorizado e pivoting.",
-        "remediation": "Mover segredos para gestão central (vault), remover do código, usar referências (env/secret manager) e revisão de commits anteriores.",
-        "references": ["https://cwe.mitre.org/data/definitions/312.html"],
-    },
-    "SRV-004": {
-        "cwe": ["CWE-200"],
-        "vulnerability": "Configuração de segredo vazio/nulo",
-        "risk": "Pode resultar em desativação involuntária de controles ou fallback inseguro, expondo dados.",
-        "remediation": "Validar obrigatoriedade e formato de segredos; falhar o build/deploy se ausente; usar policy as code.",
-        "references": ["https://cwe.mitre.org/data/definitions/200.html"],
-    },
-    "SRV-010": {
-        "cwe": ["CWE-601"],
-        "vulnerability": "Open Redirect",
-        "risk": "Phishing/chaining de ataques (roubo de sessão, bypass de filtros).",
-        "remediation": "Usar allowlist de domínios/caminhos; validar e normalizar destinos; evitar confiar em parâmetros do usuário.",
-        "references": ["https://cwe.mitre.org/data/definitions/601.html"],
-    },
-    "SRV-011": {
-        "cwe": ["CWE-20"],
-        "vulnerability": "Uso direto de parâmetros de entrada",
-        "risk": "Superfície para injeções e lógica insegura.",
-        "remediation": "Aplicar validação/normalização e tipagem; usar DTOs/binders seguros e validações server-side.",
-        "references": ["https://cwe.mitre.org/data/definitions/20.html"],
-    },
-    "SRV-020": {
-        "cwe": ["CWE-328", "CWE-327"],
-        "vulnerability": "Uso de hash/algoritmo criptográfico fraco (MD5/SHA1/etc.)",
-        "risk": "Quebra por colisão, preimage e cracking rápido; permissões de forja de assinaturas.",
-        "remediation": "Migrar para algoritmos modernos (SHA-256/512, bcrypt/Argon2 para senhas) com sal/custo apropriado.",
-        "references": ["https://cwe.mitre.org/data/definitions/327.html", "https://cwe.mitre.org/data/definitions/328.html"],
-    },
-    "SRV-021": {
-        "cwe": ["CWE-327"],
-        "vulnerability": "Uso de Base64 como 'criptografia'",
-        "risk": "Reversível sem segredo; exposição de dados sensíveis.",
-        "remediation": "Usar criptografia autenticada (AES-GCM/ChaCha20-Poly1305) com gestão de chaves segura.",
-        "references": ["https://cwe.mitre.org/data/definitions/327.html"],
-    },
-    "SRV-022": {
-        "cwe": ["CWE-327", "CWE-330"],
-        "vulnerability": "Pseudo-criptografia por operação aritmética/concatenada",
-        "risk": "Proteção ilusória; fácil engenharia reversa e vazamento.",
-        "remediation": "Usar bibliotecas criptográficas padrão; evitar 'homebrew crypto'.",
-        "references": ["https://cwe.mitre.org/data/definitions/330.html"],
-    },
-    "SRV-030": {
-        "cwe": ["CWE-89"],
-        "vulnerability": "SQL Injection",
-        "risk": "Exfiltração/modificação de dados, RCE via UDF/stacked queries.",
-        "remediation": "Usar queries parametrizadas/ORM, validar entrada, princípio de menor privilégio no DB.",
-        "references": ["https://cwe.mitre.org/data/definitions/89.html"],
-    },
-    "SRV-031": {
-        "cwe": ["CWE-94"],
-        "vulnerability": "Code Injection via eval/exec",
-        "risk": "Execução arbitrária de código; takeover do host.",
-        "remediation": "Remover eval/exec; usar mapeamentos seguros, whitelists e parsers; sandbox quando necessário.",
-        "references": ["https://cwe.mitre.org/data/definitions/94.html"],
-    },
-    "SRV-032": {
-        "cwe": ["CWE-78"],
-        "vulnerability": "Command Injection (SO)",
-        "risk": "Execução de comandos arbitrários, exfiltração e persistência.",
-        "remediation": "Usar APIs seguras (subprocess com lista/args), evitar shells, validar/escapar entradas.",
-        "references": ["https://cwe.mitre.org/data/definitions/78.html"],
-    },
-    "SRV-033": {
-        "cwe": ["CWE-78"],
-        "vulnerability": "Construção de comandos por concatenação",
-        "risk": "Facilita injeção de parâmetros controlados pelo usuário.",
-        "remediation": "Construir comandos por lista de argumentos sem shell; sanitizar dados.",
-        "references": ["https://cwe.mitre.org/data/definitions/78.html"],
-    },
-    "SRV-040": {
-        "cwe": ["CWE-22"],
-        "vulnerability": "Acesso a arquivo sem validação (Path Traversal)",
-        "risk": "Leitura de arquivos sensíveis fora do diretório esperado.",
-        "remediation": "Normalizar e restringir caminhos (allowlist), usar APIs que previnem traversal.",
-        "references": ["https://cwe.mitre.org/data/definitions/22.html"],
-    },
-    "SRV-041": {
-        "cwe": ["CWE-434"],
-        "vulnerability": "Upload sem restrições de tipo/validação",
-        "risk": "RCE via web shells, sobreposição de arquivos críticos.",
-        "remediation": "Validar MIME/assinatura, armazenar fora do webroot, renomear, dimensionar e varrer com AV.",
-        "references": ["https://cwe.mitre.org/data/definitions/434.html"],
-    },
-    "SRV-042": {
-        "cwe": ["CWE-548"],
-        "vulnerability": "Exposição por listagem de diretório",
-        "risk": "Revela estrutura/nomes de arquivos úteis para ataque.",
-        "remediation": "Desabilitar autoindex/listagem no servidor; usar index padrão.",
-        "references": ["https://cwe.mitre.org/data/definitions/548.html"],
-    },
-    "SRV-050": {
-        "cwe": ["CWE-614"],
-        "vulnerability": "Cookie de sessão sem atributo Secure",
-        "risk": "Roubo de sessão via sniffing em conexões não criptografadas.",
-        "remediation": "Definir Secure/HttpOnly/SameSite; exigir HTTPS em toda a aplicação.",
-        "references": ["https://cwe.mitre.org/data/definitions/614.html"],
-    },
-    "SRV-051": {
-        "cwe": ["CWE-693"],
-        "vulnerability": "Headers de segurança ausentes (menção)",
-        "risk": "Aumenta a superfície para XSS, clickjacking, etc.",
-        "remediation": "Aplicar CSP, X-Frame-Options, X-Content-Type-Options, HSTS; revisar política.",
-        "references": ["https://cwe.mitre.org/data/definitions/693.html"],
-    },
-    "SRV-052": {
-        "cwe": ["CWE-295"],
-        "vulnerability": "Verificação de certificado TLS desativada",
-        "risk": "MITM, ligação a endpoints maliciosos e exfiltração.",
-        "remediation": "Sempre validar certificados; pinning quando aplicável; não usar verify=False.",
-        "references": ["https://cwe.mitre.org/data/definitions/295.html"],
-    },
-    "SRV-060": {
-        "cwe": ["CWE-79"],
-        "vulnerability": "Cross-Site Scripting (XSS)",
-        "risk": "Roubo de sessão, defacement, pivot para outras contas.",
-        "remediation": "Escapar/encode por contexto, CSP, sanitização/templating seguro, evitar sinks perigosos.",
-        "references": ["https://cwe.mitre.org/data/definitions/79.html"],
-    },
-    "SRV-070": {
-        "cwe": ["CWE-703"],
-        "vulnerability": "Tratamento genérico de exceções",
-        "risk": "Oculta falhas e pode mascarar condições inseguras.",
-        "remediation": "Capturar exceções específicas, logar com parcimônia (sem segredos) e falhar de forma segura.",
-        "references": ["https://cwe.mitre.org/data/definitions/703.html"],
-    },
-    "SRV-071": {
-        "cwe": ["CWE-215"],
-        "vulnerability": "Modo debug/log verboso em produção",
-        "risk": "Exfiltração de dados sensíveis via logs/stack traces.",
-        "remediation": "Desabilitar debug em prod; ajustar níveis de log e scrubbing de dados.",
-        "references": ["https://cwe.mitre.org/data/definitions/215.html"],
-    },
-    "SRV-072": {
-        "cwe": ["CWE-200", "CWE-615"],
-        "vulnerability": "Segredo/senha em comentários",
-        "risk": "Descoberta acidental por terceiros e varredores.",
-        "remediation": "Remover comentários sensíveis, usar pre-commit hooks e scans de segredos na pipeline.",
-        "references": ["https://cwe.mitre.org/data/definitions/200.html"],
-    },
-    "SRV-080": {
-        "cwe": ["CWE-200"],
-        "vulnerability": "Menção a paths sensíveis/endpoints administrativos",
-        "risk": "Ajuda reconhecimento/enumeração, facilitando exploração.",
-        "remediation": "Proteger endpoints com auth/ACL, não expor paths internos em clientes/logs.",
-        "references": ["https://cwe.mitre.org/data/definitions/200.html"],
-    },
-    "SRV-090": {
-        "cwe": ["CWE-306"],
-        "vulnerability": "Rota possivelmente sem autenticação obrigatória",
-        "risk": "Acesso não autenticado a funções críticas.",
-        "remediation": "Aplicar decorators/filtros de autenticação/autorização nas rotas; testes de acesso.",
-        "references": ["https://cwe.mitre.org/data/definitions/306.html"],
-    },
-}
-
-# Pré-compila regex
-for r in RULES:
-    if r.get("re"):
-        r["rx"] = re.compile(r["re"], re.IGNORECASE)
-
-
-def is_text_file(path: str, limit: int = 8192) -> bool:
-    try:
-        with open(path, "rb") as fh:
-            chunk = fh.read(limit)
-        if b"\x00" in chunk:
-            return False
-        return True
-    except Exception:
-        return False
-
-
-def should_skip(path: str, skip_dirs: Iterable[str]) -> bool:
-    parts = set(os.path.normpath(path).split(os.sep))
-    return any(d in parts for d in skip_dirs)
-
-
-def truncate(s: str, n: int = 300) -> str:
-    s = (s or "").strip()
-    return s if len(s) <= n else s[: n - 1] + "…"
-
-
-def scan_file(path: str, rules: List[Dict], max_bytes: int) -> List[Dict]:
-    findings: List[Dict] = []
-    if not is_text_file(path):
-        return findings
-    try:
-        if os.path.getsize(path) > max_bytes:
-            return findings
-    except OSError:
-        return findings
-
-    try:
-        # Leitura tolerante
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-            lines = fh.readlines()
-    except Exception as e:
-        return [{
-            "rule_id": "SRV-000",
-            "title": "Erro de leitura",
-            "severity": "INFO",
-            "file": path,
-            "line": 1,
-            "message": f"Não foi possível analisar o arquivo: {e}",
-            "snippet": "",
-            "vulnerability": "",
-            "risk": "",
-            "remediation": "",
-            "cwe": [],
-            "references": [],
-        }]
-
-    for idx, line in enumerate(lines, start=1):
-        l = line.rstrip("\n")
-        for rr in rules:
-            rx = rr.get("rx")
-            if rx and rx.search(line):
-                meta = RULE_META.get(rr["id"], {})
-                findings.append({
-                    "rule_id": rr["id"],
-                    "title": rr["name"],
-                    "severity": rr["sev"],
-                    "file": path,
-                    "line": idx,
-                    "message": f"Possível ocorrência: {rr['name']}",
-                    "snippet": truncate(l),
-                    "vulnerability": meta.get("vulnerability", rr["name"]),
-                    "risk": meta.get("risk", "Risco potencial não especificado."),
-                    "remediation": meta.get("remediation", "Revise a implementação conforme boas práticas de segurança."),
-                    "cwe": meta.get("cwe", []),
-                    "references": meta.get("references", []),
-                })
-
-    # Heurística: rotas sem autenticação (python)
-    if path.endswith(".py"):
-        findings.extend(detect_unauthenticated_routes(lines, path))
-
-    return dedup(findings)
-
-
-def dedup(findings: List[Dict]) -> List[Dict]:
-    seen = set()
-    out = []
-    for f in findings:
-        key = (f["file"], f["line"], f["rule_id"], f.get("snippet", ""))
-        if key not in seen:
-            seen.add(key)
-            out.append(f)
-    return out
-
-
-def detect_unauthenticated_routes(lines: List[str], path: str) -> List[Dict]:
-    out: List[Dict] = []
-    for i, raw in enumerate(lines):
-        s = raw.strip()
-        if s.startswith("def ") and "(" in s and s.endswith(":"):
-            window = lines[max(0, i-3):i]
-            decorators = [w.strip() for w in window if w.strip().startswith("@")]
-            protected = any(re.search(r"@(login_required|jwt_required|auth(\.|_)required)", d) for d in decorators)
-            if not protected:
-                meta = RULE_META.get("SRV-090", {})
-                out.append({
-                    "rule_id": "SRV-090",
-                    "title": "rota sem autenticação (heurístico)",
-                    "severity": "HIGH",
-                    "file": path,
-                    "line": i+1,
-                    "message": "Função de rota possivelmente sem decorator de autenticação (@login_required/@jwt_required/@auth_required).",
-                    "snippet": truncate(s),
-                    "vulnerability": meta.get("vulnerability", "Rota sem autenticação"),
-                    "risk": meta.get("risk", "Acesso não autenticado a funções críticas."),
-                    "remediation": meta.get("remediation", "Aplicar decorators/filtros de autenticação/autorização nas rotas."),
-                    "cwe": meta.get("cwe", []),
-                    "references": meta.get("references", []),
-                })
-    return out
-
-
-def walk_files(root: str, exts: Iterable[str], skip_dirs: Iterable[str]) -> Iterable[str]:
-    exts = tuple(exts)
-    skip_dirs = set(skip_dirs)
-    for r, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
-        for f in files:
-            full = os.path.join(r, f)
-            if should_skip(full, skip_dirs):
-                continue
-            if f.lower().endswith(exts):
-                yield full
-
-
-def summarize(findings: List[Dict]) -> Dict[str, int]:
-    counts = {k: 0 for k in SEV_ORDER}
-    for f in findings:
-        s = f["severity"]
-        counts[s] = counts.get(s, 0) + 1
+def count_by_severity(items, key="severity"):
+    counts = {s:0 for s in SEV_ORDER}
+    for it in items:
+        sev = (it.get(key) or "UNKNOWN").upper()
+        if sev not in counts: sev = "UNKNOWN"
+        counts[sev] += 1
     return counts
 
+# =========================================================
+# CARREGAMENTO DE DADOS
+# =========================================================
 
-def to_json(findings: List[Dict]) -> Dict:
-    return {"results": findings}
+def safe_load_json(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
+# -------- SEMGREP (json nativo) --------
 
-def _sarif_help_markdown(meta: Dict) -> str:
-    vuln = meta.get("vulnerability", "")
-    risk = meta.get("risk", "")
-    rem = meta.get("remediation", "")
-    refs = meta.get("references", [])
-    md = [f"**Vulnerabilidade**: {vuln}"]
-    if risk:
-        md.append(f"\n**Risco**: {risk}")
-    if rem:
-        md.append(f"\n**Correção**: {rem}")
-    if refs:
-        md.append("\n**Referências:**\n" + "\n".join(f"- {u}" for u in refs))
-    return "\n".join(md)
-
-
-def to_sarif(findings: List[Dict]) -> Dict:
-    # Regras únicas com ajuda/descrição
-    rules_map: Dict[str, Dict] = {}
-    for f in findings:
-        rid = f["rule_id"]
-        if rid not in rules_map:
-            meta = RULE_META.get(rid, {})
-            rules_map[rid] = {
-                "id": rid,
-                "name": f.get("title", rid),
-                "shortDescription": {"text": f.get("title", rid)},
-                "fullDescription": {"text": f.get("vulnerability", f.get("message", f.get("title", rid)))},
-                "defaultConfiguration": {"level": SEV_TO_SARIF.get(f["severity"], "note")},
-                "help": {"text": _sarif_help_markdown(meta), "markdown": _sarif_help_markdown(meta)},
-                "properties": {
-                    "problem.severity": f.get("severity", "INFO"),
-                    "tags": [*meta.get("cwe", []), "security", "custom-review"],
-                },
-            }
-
-    results = []
-    for f in findings:
-        results.append({
-            "ruleId": f["rule_id"],
-            "level": SEV_TO_SARIF.get(f["severity"], "note"),
-            "message": {"text": f.get("message", f.get("title", "Finding"))},
-            "locations": [{
-                "physicalLocation": {
-                    "artifactLocation": {"uri": f["file"]},
-                    "region": {"startLine": f["line"]}
-                }
-            }],
-            "properties": {
-                "cwe": f.get("cwe", []),
-                "vulnerability": f.get("vulnerability", ""),
-                "risk": f.get("risk", ""),
-                "remediation": f.get("remediation", ""),
-                "snippet": f.get("snippet", ""),
-                "references": f.get("references", []),
-            }
+def load_semgrep_rich():
+    if not os.path.exists("semgrep.json"):
+        return []
+    data = safe_load_json("semgrep.json") or {}
+    out = []
+    for r in (data.get("results") or []):
+        extra = r.get("extra", {}) or {}
+        meta  = extra.get("metadata", {}) or {}
+        out.append({
+            "rule_id":  r.get("check_id",""),
+            "file":     r.get("path",""),
+            "line":     (r.get("start",{}) or {}).get("line",""),
+            "severity": (extra.get("severity","") or "UNKNOWN").upper(),
+            "message":  extra.get("message",""),
+            "fix":      extra.get("fix") or meta.get("fix"),
+            "references": meta.get("references", []) or meta.get("refs", [])
         })
+    return out
 
-    sarif = {
-        "version": "2.1.0",
-        "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
-        "runs": [{
-            "tool": {
-                "driver": {
-                    "name": "Custom Security Review (enhanced)",
-                    "informationUri": "https://example.local/custom-security-review",
-                    "rules": list(rules_map.values())
-                }
-            },
-            "results": results
-        }]
-    }
-    return sarif
+# -------- TRIVY: suporte a JSON (opcional legacy) e SARIF --------
+
+SARIF_SEV_FROM_LEVEL = {
+    "error": "HIGH",    # mapeamento conservador
+    "warning": "MEDIUM",
+    "note": "LOW",
+}
+
+TRIVY_SARIF_FILES_VULN = [
+    "trivy-image.sarif",
+    "trivy-fs-vuln.sarif",
+]
+TRIVY_SARIF_FILES_SECRETS = [
+    "trivy-fs-secrets.sarif",
+]
+TRIVY_SARIF_FILES_CONFIG = [
+    "trivy-config.sarif",
+    "trivy-config-dockerfile.sarif",
+]
 
 
-def write_csv(findings: List[Dict], csv_path: str) -> None:
-    """Escreve CSV com colunas estendidas."""
-    fieldnames = [
-        "Rule ID", "Severity", "File", "Line", "Message", "Snippet",
-        "Vulnerability", "Risk", "Remediation", "CWE", "References"
+def _norm_severity(value, fallback="UNKNOWN"):
+    if not value:
+        return fallback
+    v = str(value).upper()
+    if v in SEV_ORDER:
+        return v
+    # tentar float (ex: security-severity "7.5")
+    try:
+        f = float(str(value))
+        if f >= 9.0: return "CRITICAL"
+        if f >= 7.0: return "HIGH"
+        if f >= 4.0: return "MEDIUM"
+        if f > 0:    return "LOW"
+        return "INFO"
+    except Exception:
+        pass
+    # tentar level -> sev
+    low = str(value).lower()
+    return SARIF_SEV_FROM_LEVEL.get(low, fallback)
+
+
+def _try_parse_pkg_from_message(msg: str):
+    # Trivy geralmente inclui linhas como: "Package: X\nInstalled: 1.2\nFixed Version: 1.3" no message.text do SARIF
+    pkg = installed = fixed = None
+    if not msg:
+        return pkg, installed, fixed
+    # padrões tolerantes
+    m = re.search(r"(?i)package\s*:\s*([\w\-\.@/]+)", msg)
+    if m: pkg = m.group(1).strip()
+    m = re.search(r"(?i)installed\s*:\s*([\w\-\.@:/]+)", msg)
+    if m: installed = m.group(1).strip()
+    m = re.search(r"(?i)(fixed|fix(?:ed)?\s*version)\s*:\s*([\w\-\.@:/]+)", msg)
+    if m: fixed = m.group(2).strip()
+    return pkg, installed, fixed
+
+
+def load_trivy_vulns_from_sarif(paths):
+    out = []
+    for p in paths:
+        if not os.path.exists(p):
+            continue
+        data = safe_load_json(p) or {}
+        for run in (data.get("runs") or []):
+            rules_map = {}
+            try:
+                for rule in ((run.get("tool", {}) or {}).get("driver", {})
+                              .get("rules", []) or []):
+                    rid = rule.get("id")
+                    rules_map[rid] = rule
+            except Exception:
+                pass
+            for r in (run.get("results") or []):
+                rid = r.get("ruleId") or (r.get("rule", {}) or {}).get("id")
+                level = (r.get("level") or "").lower()
+                props = r.get("properties", {}) or {}
+                sev = _norm_severity(props.get("severity") or props.get("problem.severity") or level or "UNKNOWN")
+                msg = ((r.get("message") or {}).get("text") or "").strip()
+                locations = r.get("locations") or []
+                file = line = None
+                if locations:
+                    pl = ((locations[0] or {}).get("physicalLocation") or {})
+                    file = ((pl.get("artifactLocation") or {}).get("uri") or
+                            (pl.get("artifactLocation") or {}).get("uriBaseId"))
+                    region = pl.get("region") or {}
+                    line = region.get("startLine")
+                # Complementa com rule description/title quando possível
+                title = None
+                url = None
+                cvss = None
+                if rid and rid in rules_map:
+                    rule = rules_map[rid]
+                    title = ((rule.get("shortDescription") or {}).get("text") or
+                             (rule.get("fullDescription") or {}).get("text"))
+                    rprops = rule.get("properties", {}) or {}
+                    # Alguns SARIF do Trivy incluem "security-severity" ou "precision" etc.
+                    for k in ("security-severity", "cvssScore", "cvss", "cvss_v3", "cvssV3"):
+                        try:
+                            v = rprops.get(k)
+                            if v is not None:
+                                f = float(v)
+                                if cvss is None or f > cvss:
+                                    cvss = f
+                        except Exception:
+                            pass
+                    url = (rprops.get("uri") or rprops.get("url") or None)
+                # Extrai pkg/versions do texto
+                pkg, installed, fixed = _try_parse_pkg_from_message(msg)
+                # Normaliza
+                out.append({
+                    "id": rid or "",
+                    "title": title or "",
+                    "description": msg,
+                    "severity": sev,
+                    "pkg": pkg or "",
+                    "installed": installed or "",
+                    "fixed": fixed or "-",
+                    "cvss": cvss,
+                    "url": url,
+                    "file": file or "",
+                    "line": line or 1,
+                    "source": os.path.basename(p),
+                })
+    return out
+
+
+def load_trivy_secrets_from_sarif(paths):
+    out = []
+    for p in paths:
+        if not os.path.exists(p):
+            continue
+        data = safe_load_json(p) or {}
+        for run in (data.get("runs") or []):
+            rules_map = {}
+            try:
+                for rule in ((run.get("tool", {}) or {}).get("driver", {})
+                              .get("rules", []) or []):
+                    rid = rule.get("id")
+                    rules_map[rid] = rule
+            except Exception:
+                pass
+            for r in (run.get("results") or []):
+                rid = r.get("ruleId") or (r.get("rule", {}) or {}).get("id")
+                level = (r.get("level") or "").lower()
+                props = r.get("properties", {}) or {}
+                sev = _norm_severity(props.get("severity") or props.get("problem.severity") or level or "UNKNOWN")
+                msg = ((r.get("message") or {}).get("text") or "").strip()
+                locations = r.get("locations") or []
+                file = line = None
+                if locations:
+                    pl = ((locations[0] or {}).get("physicalLocation") or {})
+                    file = ((pl.get("artifactLocation") or {}).get("uri") or
+                            (pl.get("artifactLocation") or {}).get("uriBaseId"))
+                    region = pl.get("region") or {}
+                    line = region.get("startLine")
+                title = None
+                if rid and rid in rules_map:
+                    rule = rules_map[rid]
+                    title = ((rule.get("shortDescription") or {}).get("text") or
+                             (rule.get("fullDescription") or {}).get("text"))
+                out.append({
+                    "rule_id": rid or "",
+                    "title": title or "Possible secret exposed",
+                    "severity": sev,
+                    "file": file or "",
+                    "line": line or 1,
+                    "message": msg,
+                    "source": os.path.basename(p),
+                })
+    return out
+
+
+def load_trivy_config_from_sarif(paths):
+    out = []
+    for p in paths:
+        if not os.path.exists(p):
+            continue
+        data = safe_load_json(p) or {}
+        for run in (data.get("runs") or []):
+            rules_map = {}
+            try:
+                for rule in ((run.get("tool", {}) or {}).get("driver", {})
+                              .get("rules", []) or []):
+                    rid = rule.get("id")
+                    rules_map[rid] = rule
+            except Exception:
+                pass
+            for r in (run.get("results") or []):
+                rid = r.get("ruleId") or (r.get("rule", {}) or {}).get("id")
+                level = (r.get("level") or "").lower()
+                props = r.get("properties", {}) or {}
+                sev = _norm_severity(props.get("severity") or props.get("problem.severity") or level or "UNKNOWN")
+                msg = ((r.get("message") or {}).get("text") or "").strip()
+                locations = r.get("locations") or []
+                file = line = None
+                if locations:
+                    pl = ((locations[0] or {}).get("physicalLocation") or {})
+                    file = ((pl.get("artifactLocation") or {}).get("uri") or
+                            (pl.get("artifactLocation") or {}).get("uriBaseId"))
+                    region = pl.get("region") or {}
+                    line = region.get("startLine")
+                title = None
+                if rid and rid in rules_map:
+                    rule = rules_map[rid]
+                    title = ((rule.get("shortDescription") or {}).get("text") or
+                             (rule.get("fullDescription") or {}).get("text"))
+                out.append({
+                    "rule_id": rid or "",
+                    "title": title or "Misconfiguration",
+                    "severity": sev,
+                    "file": file or "",
+                    "line": line or 1,
+                    "message": msg,
+                    "source": os.path.basename(p),
+                })
+    return out
+
+# -------- Custom Review (JSON) --------
+
+def load_custom_review():
+    path = "custom-review.json"
+    data = safe_load_json(path)
+    if not data:
+        return []
+    results = data.get("results", []) or []
+    out = []
+    for r in results:
+        sev = (r.get("severity") or "UNKNOWN").upper()
+        if sev not in SEV_ORDER:
+            sev = "INFO"
+        out.append({
+            "rule_id": r.get("rule_id") or r.get("id") or "",
+            "title":   r.get("title") or r.get("name") or "",
+            "severity": sev,
+            "file":    r.get("file") or "",
+            "line":    r.get("line") or 1,
+            "message": r.get("message") or "",
+            "snippet": r.get("snippet") or "",
+        })
+    return out
+
+# =========================================================
+# CAPA / TÍTULOS / RODAPÉ
+# =========================================================
+
+def draw_cover(c):
+    c.setFillColor(ORANGE_DARK); c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+    c.setFillColor(colors.white); c.setFont("Helvetica-Bold", 30)
+    c.drawString(MARGIN_L, PAGE_H - 58*mm, TITLE)
+    c.setFont("Helvetica", 16); c.drawString(MARGIN_L, PAGE_H - 72*mm, f"Empresa: {ORG_NAME}")
+    c.setFont("Helvetica", 12); c.drawString(MARGIN_L, PAGE_H - 84*mm, f"Gerado em: {DATE_STR}")
+    c.setFillColor(ORANGE_PRIMARY); c.rect(0, 0, PAGE_W, 9*mm, fill=1, stroke=0)
+    c.showPage()
+
+
+def draw_section_title(c, text, y):
+    c.setFillColor(ORANGE_LIGHT_BG)
+    c.rect(MARGIN_L-10, y-8, CONTENT_W+20, 24, fill=1, stroke=0)
+    c.setFillColor(colors.black); c.setFont("Helvetica-Bold", FONT_H)
+    c.drawString(MARGIN_L, y, text)
+    return y - 24
+
+
+def draw_footer(c):
+    page = c.getPageNumber()
+    c.setFont("Helvetica", 8.5); c.setFillColor(colors.grey)
+    c.drawRightString(PAGE_W - MARGIN_R, MARGIN_B - 5, f"Página {page}")
+    c.setFillColor(colors.black)
+
+# =========================================================
+# GRÁFICOS
+# =========================================================
+
+def draw_bars_with_values_single(c, counts_dict, title, origin_x, origin_y, width=400, height=240):
+    c.setFont("Helvetica-Bold", FONT_L); c.setFillColor(colors.black)
+    c.drawString(origin_x, origin_y + height - 10, title)
+
+    d = Drawing(width, height - 20)
+    bar = VerticalBarChart()
+    bar.x, bar.y = 36, 32
+    bar.width, bar.height = width - 80, height - 80
+    ordered_sev = ["CRITICAL","HIGH","MEDIUM","LOW","INFO"]
+    data = [int(counts_dict.get(s, 0) or 0) for s in ordered_sev]
+    bar.data = [data]
+    bar.categoryAxis.categoryNames = ordered_sev
+    bar.groupSpacing = 6
+    bar.barSpacing = 1.5
+    bar.barWidth = 14
+    bar.valueAxis.valueMin = 0
+    bar.valueAxis.labelTextFormat = '%d'
+    # colorir barras
+    try:
+        # reportlab>=3.6.13 tem .bars, versões antigas não; fallback colorir através de style ranges não trivial, então ignoramos se falhar
+        for i, sev in enumerate(ordered_sev):
+            bar.bars[i].fillColor = SEV_COLORS.get(sev, colors.lightgrey)
+    except Exception:
+        pass
+    bar.barLabelFormat = '%0.0f'
+    bar.barLabels.nudge = 5
+    bar.barLabels.fontName = "Helvetica"
+    bar.barLabels.fontSize = FONT_S
+    d.add(bar)
+    renderPDF.draw(d, c, origin_x, origin_y)
+
+
+def draw_grouped_bars_by_severity(c, left_counts, right_counts, title, x, y, width=400, height=240, left_label="Semgrep", right_label="Trivy (CVEs)"):
+    top_title_h = 22
+    bottom_axis_h = 22
+    left_pad = 32
+    right_pad = 16
+    chart_w = max(100, width - left_pad - right_pad)
+    chart_h = max(80, height - top_title_h - bottom_axis_h)
+
+    d = Drawing(width, height)
+    d.add(String(width / 2.0, height - 6, title,
+                 fontName="Helvetica-Bold", fontSize=14, textAnchor="middle"))
+
+    severities = ["CRITICAL","HIGH","MEDIUM","LOW","INFO"]
+    ymax = max([left_counts.get(s, 0) for s in severities] +
+               [right_counts.get(s, 0) for s in severities] + [0])
+    if ymax < 5:
+        ymax = 5
+
+    group_pad = 14
+    bar_w = 10
+    gap_in_group = 6
+    group_w = (2 * bar_w) + gap_in_group
+    total_groups_w = len(severities) * group_w + (len(severities) - 1) * group_pad
+
+    scale_x = min(1.0, chart_w / float(total_groups_w))
+    scale_y = chart_h / float(max(1, ymax))
+
+    ox = left_pad
+    oy = bottom_axis_h
+
+    d.add(Rect(ox - 1, oy - 1, chart_w + 2, 1.2, fillColor=colors.black, strokeWidth=0))
+
+    cursor_x = ox
+    labels_y = oy - 12
+
+    for s in severities:
+        sev_color = SEV_COLORS.get(s, colors.lightgrey)
+        vl = int(left_counts.get(s, 0) or 0)
+        vr = int(right_counts.get(s, 0) or 0)
+
+        h_l = vl * scale_y
+        h_r = vr * scale_y
+
+        bx_l = cursor_x
+        bx_r = cursor_x + bar_w + gap_in_group
+
+        d.add(Rect(bx_l, oy, bar_w, h_l,
+                   fillColor=sev_color, strokeColor=colors.black, strokeWidth=0.2))
+        if vl > 0:
+            d.add(String(bx_l + bar_w/2.0, oy + h_l + 6, str(vl),
+                         fontName="Helvetica", fontSize=9, textAnchor="middle"))
+
+        d.add(Rect(bx_r, oy, bar_w, h_r,
+                   fillColor=sev_color, strokeColor=colors.black, strokeWidth=0.2))
+        if vr > 0:
+            d.add(String(bx_r + bar_w/2.0, oy + h_r + 6, str(vr),
+                         fontName="Helvetica", fontSize=9, textAnchor="middle"))
+
+        d.add(String(cursor_x + group_w/2.0, labels_y, s,
+                     fontName="Helvetica", fontSize=9, textAnchor="middle"))
+
+        cursor_x += (group_w + group_pad)
+
+    if scale_x < 1.0:
+        d.scale(scale_x, 1.0)
+        d.translate(ox * (1 - scale_x) / scale_x, 0)
+
+    leg = Legend()
+    leg.fontName = "Helvetica"
+    leg.fontSize = 10
+    leg.alignment = 'right'
+    leg.x = width - 160
+    leg.y = height - 26
+    leg.colorNamePairs = [
+        (ORANGE_DARK, left_label),
+        (ORANGE_PRIMARY, right_label),
     ]
-    with open(csv_path, "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for it in findings:
-            w.writerow({
-                "Rule ID": it.get("rule_id", ""),
-                "Severity": it.get("severity", ""),
-                "File": it.get("file", ""),
-                "Line": it.get("line", ""),
-                "Message": it.get("message", ""),
-                "Snippet": it.get("snippet", ""),
-                "Vulnerability": it.get("vulnerability", ""),
-                "Risk": it.get("risk", ""),
-                "Remediation": it.get("remediation", ""),
-                "CWE": ",".join(it.get("cwe", [])),
-                "References": ",".join(it.get("references", [])),
-            })
+    d.add(leg)
 
+    renderPDF.draw(d, c, x, y)
+
+# =========================================================
+# RISCO & CVSS
+# =========================================================
+
+def avg_cvss(trivy):
+    scores = [v.get("cvss") for v in trivy if isinstance(v.get("cvss"), (int,float))]
+    scores = [s for s in scores if s is not None and isfinite(s)]
+    return (sum(scores)/len(scores)) if scores else None
+
+# =========================================================
+# TÓPICOS (Semgrep, Trivy, Secrets, Config, Custom Review)
+# =========================================================
+
+def draw_topic(c, y, heading, items, color=None):
+    heading_lines = wrap_lines(c, heading, CONTENT_W - 20, font="Helvetica-Bold", size=FONT_M)
+    heading_height = len(heading_lines) * LINE_H + 8
+
+    bullets_est_h = max(LINE_H * 2 * len(items), LINE_H * len(items)) + 8
+
+    need_h = heading_height + bullets_est_h + 12
+    if y - need_h < MARGIN_B + 10:
+        draw_footer(c)
+        c.showPage()
+        y = PAGE_H - MARGIN_T
+
+    x = MARGIN_L
+    if color:
+        c.setFillColor(color)
+        c.roundRect(x, y-14, 10, 10, 2.5, fill=1, stroke=0)
+        x += 16
+
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica-Bold", FONT_M)
+    for hl in heading_lines:
+        c.drawString(x, y, hl)
+        y -= LINE_H
+    y -= 4
+
+    for ln in items:
+        if y - (LINE_H * 2) < MARGIN_B + 8:
+            draw_footer(c)
+            c.showPage()
+            y = PAGE_H - MARGIN_T
+            c.setFont("Helvetica", FONT_S)
+        y = draw_bullet_paragraph(
+            c, x=MARGIN_L + 10, y=y,
+            text=ln, max_width=CONTENT_W - 20,
+            bullet="• ", font="Helvetica", size=FONT_S
+        )
+    y -= 6
+    return y
+
+
+def draw_semgrep_topics(c, semgrep):
+    y = PAGE_H - MARGIN_T
+    y = draw_section_title(c, "Vulnerabilidades – SAST (Semgrep)", y)
+    for r in semgrep:
+        sev = (r.get("severity") or "UNKNOWN").upper()
+        heading = f"[{sev}] {r.get('rule_id','')}".strip()
+        arquivo = f"Arquivo: {r.get('file','')}:{r.get('line','')}".strip(":")
+        risco   = f"Risco: {r.get('message','')}" if r.get("message") else "Risco: (não informado pela regra)"
+        fix     = r.get("fix")
+        if fix:
+            sugestao = f"Sugestão: {fix}"
+        else:
+            sugestao = "Sugestão: aplicar mitigação recomendada pela regra."
+        refs = r.get("references") or []
+        ref_line = f"Referências: {', '.join(refs[:2])}" if refs else None
+
+        lines = [arquivo, risco, sugestao]
+        if ref_line: lines.append(ref_line)
+        y = draw_topic(c, y, heading, lines, color=SEV_COLORS.get(sev, colors.grey))
+    draw_footer(c); c.showPage()
+
+
+def draw_trivy_topics(c, vulns):
+    y = PAGE_H - MARGIN_T
+    y = draw_section_title(c, "Vulnerabilidades – SCA (Trivy)", y)
+    for v in vulns:
+        sev   = (v.get("severity") or "UNKNOWN").upper()
+        vid   = v.get("id","")
+        title = v.get("title") or ""
+        head  = f"[{sev}] {vid}" + (f" — {title}" if title else "")
+        pkg   = v.get("pkg","")
+        inst  = v.get("installed","")
+        fix   = v.get("fixed","-")
+
+        l_pkg  = f"Pacote: {pkg} ({inst} -> {fix})" if (pkg or inst or fix) else None
+        l_cvss = f"CVSS: {v['cvss']:.1f}" if isinstance(v.get("cvss"), (int,float)) else None
+        desc   = (v.get("description") or "").strip()
+        l_risk = "Risco: " + (desc if desc else "(sem descrição do fornecedor)")
+        l_fix  = f"Sugestão: atualizar para {fix}" if fix and fix != "-" else "Sugerido: verificar boletins/patch."
+        url    = v.get("url")
+        l_ref  = f"Referência: {url}" if url else None
+        fileln = None
+        if v.get("file"):
+            fileln = f"Arquivo: {v.get('file')}:{v.get('line',1)}"
+        src    = v.get("source")
+        source = f"Fonte: {src}" if src else None
+
+        lines = [ln for ln in [l_pkg, l_cvss, l_risk, l_fix, l_ref, fileln, source] if ln]
+        y = draw_topic(c, y, head, lines, color=SEV_COLORS.get(sev, colors.grey))
+    draw_footer(c); c.showPage()
+
+
+def draw_secrets_topics(c, secrets):
+    y = PAGE_H - MARGIN_T
+    y = draw_section_title(c, "Exposição de Segredos – (Trivy Secrets)", y)
+    for f in secrets:
+        sev   = (f.get("severity") or "UNKNOWN").upper()
+        rid   = f.get("rule_id","")
+        title = f.get("title") or "Secret detectado"
+        head  = f"[{sev}] {rid}" + (f" — {title}" if title else "")
+        fileline = f"Arquivo: {f.get('file','')}:{f.get('line',1)}".strip(":")
+        msg  = f.get("message") or "(sem detalhes)"
+        src  = f.get("source")
+        src_line = f"Fonte: {src}" if src else None
+        lines = [fileline, f"Mensagem: {msg}"]
+        if src_line: lines.append(src_line)
+        y = draw_topic(c, y, head, lines, color=SEV_COLORS.get(sev, colors.grey))
+    draw_footer(c); c.showPage()
+
+
+def draw_config_topics(c, cfg):
+    y = PAGE_H - MARGIN_T
+    y = draw_section_title(c, "Misconfigurações – IaC/Config (Trivy)", y)
+    for f in cfg:
+        sev   = (f.get("severity") or "UNKNOWN").upper()
+        rid   = f.get("rule_id","")
+        title = f.get("title") or "Misconfiguration"
+        head  = f"[{sev}] {rid}" + (f" — {title}" if title else "")
+        fileline = f"Arquivo: {f.get('file','')}:{f.get('line',1)}".strip(":")
+        msg  = f.get("message") or "(sem detalhes)"
+        src  = f.get("source")
+        src_line = f"Fonte: {src}" if src else None
+        lines = [fileline, f"Mensagem: {msg}"]
+        if src_line: lines.append(src_line)
+        y = draw_topic(c, y, head, lines, color=SEV_COLORS.get(sev, colors.grey))
+    draw_footer(c); c.showPage()
+
+
+def draw_custom_topics(c, findings):
+    y = PAGE_H - MARGIN_T
+    y = draw_section_title(c, "Achados – Custom Security Review", y)
+    for f in findings:
+        sev   = (f.get("severity") or "UNKNOWN").upper()
+        rid   = f.get("rule_id","")
+        title = f.get("title") or ""
+        head  = f"[{sev}] {rid}" + (f" — {title}" if title else "")
+        fileline = f"Arquivo: {f.get('file','')}:{f.get('line',1)}".strip(":")
+        msg  = f.get("message") or None
+        snip = f.get("snippet") or None
+        lines = [ln for ln in [fileline, f"Mensagem: {msg}" if msg else None, f"Snippet: {snip[:180]}" if snip else None] if ln]
+        y = draw_topic(c, y, head, lines, color=SEV_COLORS.get(sev, colors.grey))
+    draw_footer(c); c.showPage()
+
+# =========================================================
+# SUMÁRIO (TOC) / MERGE PDF
+# =========================================================
+
+def build_toc_pdf(toc_items, outfile="toc.pdf"):
+    c = canvas.Canvas(outfile, pagesize=A4)
+    y = PAGE_H - MARGIN_T
+    c.setFont("Helvetica-Bold", 18); c.drawString(MARGIN_L, y, "Sumário")
+    y -= 20; c.setLineWidth(0.7); c.setStrokeColor(colors.HexColor("#e5e7eb"))
+    c.line(MARGIN_L, y, MARGIN_L + CONTENT_W, y)
+    y -= 14; c.setFont("Helvetica", FONT_M)
+    for title, page in toc_items:
+        c.drawString(MARGIN_L, y, title)
+        c.drawRightString(MARGIN_L + CONTENT_W, y, str(page))
+        y -= 14
+        if y < MARGIN_B + 16:
+            c.showPage()
+            y = PAGE_H - MARGIN_T
+            c.setFont("Helvetica-Bold", 18); c.drawString(MARGIN_L, y, "Sumário (cont.)")
+            y -= 20; c.setLineWidth(0.7); c.setStrokeColor(colors.HexColor("#e5e7eb"))
+            c.line(MARGIN_L, y, MARGIN_L + CONTENT_W, y)
+            y -= 14; c.setFont("Helvetica", FONT_M)
+    c.save()
+
+
+def merge_cover_toc_content(content_path="content.pdf", toc_path="toc.pdf", out_path="security-report.pdf"):
+    try:
+        from PyPDF2 import PdfReader, PdfWriter
+    except Exception:
+        try:
+            os.replace(content_path, out_path)
+        except Exception:
+            pass
+        return
+    reader = PdfReader(content_path); writer = PdfWriter()
+    # capa
+    writer.add_page(reader.pages[0])
+    # sumário
+    toc_reader = PdfReader(toc_path)
+    for p in toc_reader.pages: writer.add_page(p)
+    # demais
+    for i in range(1, len(reader.pages)): writer.add_page(reader.pages[i])
+    with open(out_path, "wb") as f: writer.write(f)
+
+# =========================================================
+# PRINCIPAL
+# =========================================================
 
 def main():
-    ap = argparse.ArgumentParser("custom_security_review_enhanced")
-    ap.add_argument("--root", default=".", help="Diretório raiz do projeto")
-    ap.add_argument("--json-out", default="custom-review.json", help="Arquivo JSON de saída")
-    ap.add_argument("--sarif-out", default="custom-review.sarif", help="Arquivo SARIF 2.1.0 de saída")
-    ap.add_argument("--csv-out", default=None, help="Arquivo CSV de saída (opcional)")
-    ap.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES, help="Tamanho máximo por arquivo")
-    ap.add_argument("--include-extensions", default=",".join(DEFAULT_EXTS), help="Extensões que serão analisadas (csv)")
-    ap.add_argument("--exclude-dirs", default=",".join(sorted(DEFAULT_SKIP_DIRS)), help="Pastas a ignorar (csv)")
-    ap.add_argument("--fail-on", choices=SEV_ORDER, help="Falha (exit 1) se houver achados >= severidade informada")
-    args = ap.parse_args()
+    # Carrega dados primários
+    semgrep = load_semgrep_rich()
 
-    max_bytes = int(args.max_bytes)
-    exts = [e.strip().lower() for e in args.include_extensions.split(",") if e.strip()]
-    skip_dirs = set([d.strip() for d in args.exclude_dirs.split(",") if d.strip()])
+    # Trivy CVEs: tenta JSON legado (trivy-results.json); se não existir, usa SARIFs (image + fs-vuln)
+    trivy_vulns = []
+    if os.path.exists("trivy-results.json"):
+        # Suporte a legado, reaproveitando estrutura original do script
+        tri = safe_load_json("trivy-results.json") or {}
+        for res in tri.get("Results", []) or []:
+            for v in res.get("Vulnerabilities", []) or []:
+                sev = (v.get("Severity") or "UNKNOWN").upper()
+                refs  = v.get("References") or []
+                url   = v.get("PrimaryURL") or (refs[0] if refs else None)
+                # Extrai melhor cvss possível
+                cvss = None
+                cvss_dict = v.get("CVSS") or {}
+                try:
+                    for _, dv in cvss_dict.items():
+                        if isinstance(dv, dict):
+                            for k in ("V4Score","V31Score","V30Score","Score","BaseScore"):
+                                if k in dv:
+                                    f = float(dv[k])
+                                    if cvss is None or f > cvss:
+                                        cvss = f
+                except Exception:
+                    cvss = None
+                trivy_vulns.append({
+                    "id": v.get("VulnerabilityID",""),
+                    "title": v.get("Title") or "",
+                    "description": v.get("Description") or "",
+                    "severity": sev,
+                    "pkg": v.get("PkgName",""),
+                    "installed": v.get("InstalledVersion",""),
+                    "fixed": v.get("FixedVersion") or "-",
+                    "cvss": cvss,
+                    "url": url,
+                    "file": "",
+                    "line": 1,
+                    "source": "trivy-results.json",
+                })
+    else:
+        trivy_vulns = load_trivy_vulns_from_sarif(TRIVY_SARIF_FILES_VULN)
 
-    all_findings: List[Dict] = []
-    for p in walk_files(args.root, exts, skip_dirs):
-        all_findings.extend(scan_file(p, RULES, max_bytes))
-    all_findings = dedup(all_findings)
+    trivy_secrets = load_trivy_secrets_from_sarif(TRIVY_SARIF_FILES_SECRETS)
+    trivy_config  = load_trivy_config_from_sarif(TRIVY_SARIF_FILES_CONFIG)
 
-    # Saídas
-    with open(args.json_out, "w", encoding="utf-8") as fj:
-        json.dump(to_json(all_findings), fj, ensure_ascii=False, indent=2)
+    custom  = load_custom_review()
 
-    with open(args.sarif_out, "w", encoding="utf-8") as fsr:
-        json.dump(to_sarif(all_findings), fsr, ensure_ascii=False, indent=2)
+    semgrep_counts = count_by_severity(semgrep, key="severity")
+    trivy_counts   = count_by_severity(trivy_vulns,   key="severity")
+    secrets_counts = count_by_severity(trivy_secrets, key="severity")
+    config_counts  = count_by_severity(trivy_config,  key="severity")
+    custom_counts  = count_by_severity(custom,        key="severity")
 
-    if args.csv_out:
-        write_csv(all_findings, args.csv_out)
+    # CONTENT (capa + seções)
+    section_pages = {}
+    c = canvas.Canvas("content.pdf", pagesize=A4)
 
-    counts = summarize(all_findings)
-    total = sum(counts.values())
-    print(f"[custom-review] encontrados {total} achados -> {counts}")
+    # Capa
+    draw_cover(c)
 
-    if args.fail_on:
-        # Se existir qualquer achado >= fail_on -> exit 1
-        if any(sev_gte(s, args.fail_on) and c > 0 for s, c in counts.items()):
-            sys.exit(1)
+    # Resumo Executivo
+    section_pages["Resumo Executivo"] = c.getPageNumber()
+    y = PAGE_H - MARGIN_T
+    y = draw_section_title(c, "Resumo Executivo", y)
+
+    c.setFont("Helvetica-Bold", FONT_M)
+    risks = {
+        "Risco Imediato (CRITICAL)": semgrep_counts["CRITICAL"] + trivy_counts["CRITICAL"] + secrets_counts["CRITICAL"] + config_counts["CRITICAL"] + custom_counts["CRITICAL"],
+        "Risco Alto (HIGH)":         semgrep_counts["HIGH"]     + trivy_counts["HIGH"]     + secrets_counts["HIGH"]     + config_counts["HIGH"]     + custom_counts["HIGH"],
+        "Risco Médio (MEDIUM)":      semgrep_counts["MEDIUM"]   + trivy_counts["MEDIUM"]   + secrets_counts["MEDIUM"]   + config_counts["MEDIUM"]   + custom_counts["MEDIUM"],
+        "Monitoramento (LOW/INFO)":  (semgrep_counts["LOW"] + semgrep_counts["INFO"] +
+                                      trivy_counts["LOW"]   + trivy_counts["INFO"] +
+                                      secrets_counts["LOW"] + secrets_counts["INFO"] +
+                                      config_counts["LOW"]  + config_counts["INFO"] +
+                                      custom_counts["LOW"]  + custom_counts["INFO"]),
+    }
+    for label, val in risks.items():
+        if "CRITICAL" in label: c.setFillColor(SEV_COLORS["CRITICAL"])
+        elif "HIGH" in label:   c.setFillColor(SEV_COLORS["HIGH"])
+        elif "MEDIUM" in label: c.setFillColor(SEV_COLORS["MEDIUM"])
+        else:                    c.setFillColor(SEV_COLORS["LOW"])
+        c.drawString(MARGIN_L, y, f"{label}: {val}")
+        y -= 14
+    c.setFillColor(colors.black)
+
+    sem_total = sum(semgrep_counts.values())
+    tri_total = sum(trivy_counts.values())
+    sec_total = sum(secrets_counts.values())
+    cfg_total = sum(config_counts.values())
+    cus_total = sum(custom_counts.values())
+
+    avg = avg_cvss(trivy_vulns)
+    y -= 6; c.setFont("Helvetica", FONT_M)
+    c.drawString(MARGIN_L, y, f"Totais → Semgrep: {sem_total} | Trivy (CVEs): {tri_total} | Secrets: {sec_total} | Config: {cfg_total} | Custom: {cus_total}")
+    y -= 14
+    c.drawString(MARGIN_L, y, f"CVSS médio (quando disponível): {avg:.1f}" if avg is not None else "CVSS médio: N/A")
+    y -= 12
+
+    # Heatmap Semgrep x Trivy (CVEs)
+    def draw_heatmap(c, sem_counts, tri_counts, title, origin_x, origin_y):
+        c.setFont("Helvetica-Bold", FONT_L); c.setFillColor(colors.black)
+        c.drawString(origin_x, origin_y + 150, title)
+
+        grid_w, grid_h = 340, 110
+        cell_w = grid_w / 5.0  # CRITICAL..INFO
+        cell_h = grid_h / 2.0
+        d = Drawing(grid_w, grid_h)
+
+        max_val = max([*sem_counts.values(), *tri_counts.values(), 1])
+        SEV_HEAT_TARGET = {
+            "CRITICAL": SEV_COLORS["CRITICAL"],
+            "HIGH":     ORANGE_DARK,
+            "MEDIUM":   ORANGE_PRIMARY,
+            "LOW":      colors.HexColor("#fed7aa"),
+            "INFO":     SEV_COLORS["INFO"],
+        }
+
+        order = ["CRITICAL","HIGH","MEDIUM","LOW","INFO"]
+        for r, _src in enumerate(["Semgrep","Trivy (CVEs)"]):
+            for c_idx, sev in enumerate(order):
+                v = sem_counts[sev] if r == 0 else tri_counts[sev]
+                intensity = (v / max_val) if max_val else 0.0
+                base = colors.white; mix = SEV_HEAT_TARGET[sev]
+                fill = colors.Color(
+                    base.red   + (mix.red   - base.red)   * intensity,
+                    base.green + (mix.green - base.green) * intensity,
+                    base.blue  + (mix.blue  - base.blue)  * intensity
+                )
+                x = c_idx * cell_w; y2 = (1 - r) * cell_h
+                rect = Rect(x, y2, cell_w - 3, cell_h - 3, strokeWidth=0.2,
+                            strokeColor=colors.lightgrey, fillColor=fill)
+                d.add(rect)
+                label_color = colors.white if intensity >= 0.60 else colors.black
+                d.add(String(x + cell_w/2 - 6, y2 + cell_h/2 - 5, str(v),
+                             fontName="Helvetica", fontSize=FONT_S, fillColor=label_color))
+
+        renderPDF.draw(d, c, origin_x, origin_y)
+
+    draw_heatmap(c, semgrep_counts, trivy_counts, "Heatmap de Severidade (Semgrep × Trivy CVEs)", MARGIN_L, y - 150)
+    draw_footer(c); c.showPage()
+
+    # Visão Geral – Gráficos
+    section_pages["Visão Geral – Gráficos"] = c.getPageNumber()
+    y = PAGE_H - MARGIN_T
+    y = draw_section_title(c, "Visão Geral – Gráficos", y)
+    y -= 14
+
+    # Comparativo Semgrep × Trivy (por severidade)
+    draw_grouped_bars_by_severity(
+        c, semgrep_counts, trivy_counts,
+        "SAST × SCA por Severidade (cores = severidade)",
+        MARGIN_L, y - 240, width=PAGE_W - MARGIN_L - MARGIN_R, height=240
+    )
+    y = y - 260
+
+    # Barras Secrets (severidades)
+    draw_bars_with_values_single(
+        c, secrets_counts,
+        "Severidades – Exposição de Segredos (Trivy)",
+        MARGIN_L, y - 240, width=PAGE_W - MARGIN_L - MARGIN_R, height=240
+    )
+    draw_footer(c); c.showPage()
+
+    # Semgrep – Tópicos
+    section_pages["Vulnerabilidades – SAST"] = c.getPageNumber()
+    draw_semgrep_topics(c, semgrep)
+
+    # Trivy – Vulnerabilidades (CVEs)
+    section_pages["Vulnerabilidades – SCA (Trivy)"] = c.getPageNumber()
+    draw_trivy_topics(c, trivy_vulns)
+
+    # Trivy – Secrets
+    if trivy_secrets:
+        section_pages["Exposição de Segredos – Trivy"] = c.getPageNumber()
+        draw_secrets_topics(c, trivy_secrets)
+
+    # Trivy – Config/IaC
+    if trivy_config:
+        section_pages["Misconfigurações – IaC/Config (Trivy)"] = c.getPageNumber()
+        draw_config_topics(c, trivy_config)
+
+    # Custom Review – Tópicos
+    section_pages["Achados – Custom Review"] = c.getPageNumber()
+    draw_custom_topics(c, custom)
+
+    c.save()
+
+    # Sumário (TOC) + merge
+    toc_items = []
+    for name, p in section_pages.items():
+        # após a capa, o sumário é inserido; então cada seção desloca +1
+        final_page = p + 1 if p >= 2 else p
+        toc_items.append((name, final_page))
+    build_toc_pdf(toc_items, "toc.pdf")
+    merge_cover_toc_content("content.pdf", "toc.pdf", "security-report.pdf")
+
+    try:
+        os.remove("content.pdf"); os.remove("toc.pdf")
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     main()
