@@ -2,10 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-Custom Security Review (enhanced, text-aware)
-- Inclui metadados por achado (vulnerabilidade, risco, correção, CWE, referências).
-- Suporta varredura de arquivos de texto comuns: Dockerfile (sem extensão), .yaml/.yml, .env, .ini, .conf, .cfg, .properties, etc.
-- Adiciona heurísticas específicas para Dockerfile e YAML/Kubernetes/Compose.
+Custom Security Review (enhanced)
+- Para cada achado, inclui: vulnerabilidade explorável (descrição), risco e correção sugerida.
+- Adiciona metadados (CWE, referências) no JSON e SARIF (help markdown), e colunas extras no CSV.
 """
 
 import argparse
@@ -19,19 +18,11 @@ from typing import Dict, List, Iterable
 # -----------------------
 # Configuração principal (defaults)
 # -----------------------
-# Extensões padrão + formatos de texto de config
-DEFAULT_EXTS = [
-    ".py", ".js", ".php", ".java", ".ts", ".jsx", ".tsx",
-    ".yaml", ".yml", ".env", ".ini", ".conf", ".cfg", ".properties",
-]
-
-# Nomes de arquivos considerados texto mesmo sem extensão (ex.: Dockerfile)
-TEXT_ONLY_BASENAMES = {"dockerfile", "Dockerfile"}
-
+DEFAULT_EXTS = [".py", ".js", ".php", ".java", ".ts", ".jsx", ".tsx"]
 DEFAULT_SKIP_DIRS = {
     ".git", ".hg", ".svn", ".tox", ".mypy_cache", ".pytest_cache",
     "node_modules", "dist", "build", "out", ".venv", "venv", "__pycache__",
-    ".next", ".nuxt", ".yarn", ".pnpm-store", "coverage", "scripts"
+    ".next", ".nuxt", ".yarn", ".pnpm-store", "coverage", "scripts"  # scripts opcional
 }
 DEFAULT_MAX_BYTES = 1_000_000  # 1 MB por arquivo
 
@@ -100,38 +91,189 @@ RULES = [
     {"id": "SRV-090", "name": "rota sem autenticação (heurístico)", "re": r"", "sev": "HIGH"},
 ]
 
-# Metadados por regra
+# Metadados por regra: CWE, vulnerabilidade explorável (descrição), risco, correção e referências
 RULE_META: Dict[str, Dict] = {
-    "SRV-001": {"cwe": ["CWE-798"], "vulnerability": "Credenciais/API Keys hardcoded expostas no código", "risk": "Acesso não autorizado e takeover.", "remediation": "Remover do código e usar secret manager; rotacionar chaves.", "references": ["https://cwe.mitre.org/data/definitions/798.html"]},
-    "SRV-002": {"cwe": ["CWE-321"], "vulnerability": "Chave privada/certificado no repositório", "risk": "Impersonation/MITM.", "remediation": "Remover, guardar em vault/KMS e rotacionar imediatamente.", "references": ["https://cwe.mitre.org/data/definitions/321.html"]},
-    "SRV-003": {"cwe": ["CWE-798", "CWE-312"], "vulnerability": "Atribuição de segredo sensível", "risk": "Vazamento via VCS/logs.", "remediation": "Usar variáveis/env e secret manager; revisar histórico.", "references": ["https://cwe.mitre.org/data/definitions/312.html"]},
-    "SRV-004": {"cwe": ["CWE-200"], "vulnerability": "Segredo vazio/nulo", "risk": "Fallback inseguro/exposição.", "remediation": "Validar obrigatoriedade; falhar build se ausente.", "references": ["https://cwe.mitre.org/data/definitions/200.html"]},
-    "SRV-010": {"cwe": ["CWE-601"], "vulnerability": "Open Redirect", "risk": "Phishing/bypass.", "remediation": "Allowlist de destinos; normalização.", "references": ["https://cwe.mitre.org/data/definitions/601.html"]},
-    "SRV-011": {"cwe": ["CWE-20"], "vulnerability": "Uso direto de parâmetros", "risk": "Injeções e lógica insegura.", "remediation": "Validação/normalização tipada.", "references": ["https://cwe.mitre.org/data/definitions/20.html"]},
-    "SRV-020": {"cwe": ["CWE-328", "CWE-327"], "vulnerability": "Algoritmo criptográfico fraco", "risk": "Colisões/cracking.", "remediation": "SHA-256/512, bcrypt/Argon2, sal/custo.", "references": ["https://cwe.mitre.org/data/definitions/327.html"]},
-    "SRV-021": {"cwe": ["CWE-327"], "vulnerability": "Base64 como 'cripto'", "risk": "Reversão trivial.", "remediation": "Criptografia autenticada (AES-GCM).", "references": ["https://cwe.mitre.org/data/definitions/327.html"]},
-    "SRV-022": {"cwe": ["CWE-327", "CWE-330"], "vulnerability": "'Homebrew crypto' aritmética", "risk": "Proteção ilusória.", "remediation": "Usar libs padrão.", "references": ["https://cwe.mitre.org/data/definitions/330.html"]},
-    "SRV-030": {"cwe": ["CWE-89"], "vulnerability": "SQL Injection", "risk": "Exfiltração/RCE.", "remediation": "Parametrização/ORM e validação.", "references": ["https://cwe.mitre.org/data/definitions/89.html"]},
-    "SRV-031": {"cwe": ["CWE-94"], "vulnerability": "Code Injection via eval/exec", "risk": "Execução arbitrária.", "remediation": "Remover eval/exec; whitelists/parsers.", "references": ["https://cwe.mitre.org/data/definitions/94.html"]},
-    "SRV-032": {"cwe": ["CWE-78"], "vulnerability": "Command Injection (SO)", "risk": "Execução de comandos.", "remediation": "APIs seguras (args list), sem shell.", "references": ["https://cwe.mitre.org/data/definitions/78.html"]},
-    "SRV-033": {"cwe": ["CWE-78"], "vulnerability": "Concatenação de comandos", "risk": "Injeção facilitada.", "remediation": "Construir lista de args; sanitizar dados.", "references": ["https://cwe.mitre.org/data/definitions/78.html"]},
-    "SRV-040": {"cwe": ["CWE-22"], "vulnerability": "Path Traversal potencial", "risk": "Leitura de arquivos sensíveis.", "remediation": "Normalizar/restringir paths.", "references": ["https://cwe.mitre.org/data/definitions/22.html"]},
-    "SRV-041": {"cwe": ["CWE-434"], "vulnerability": "Upload sem restrições", "risk": "Web shells/RCE.", "remediation": "Validar MIME/assinatura; armazenar fora do webroot.", "references": ["https://cwe.mitre.org/data/definitions/434.html"]},
-    "SRV-042": {"cwe": ["CWE-548"], "vulnerability": "Listagem de diretório", "risk": "Exposição de estrutura.", "remediation": "Desabilitar autoindex.", "references": ["https://cwe.mitre.org/data/definitions/548.html"]},
-    "SRV-050": {"cwe": ["CWE-614"], "vulnerability": "Cookie sem Secure", "risk": "Roubo de sessão.", "remediation": "Secure/HttpOnly/SameSite e HTTPS.", "references": ["https://cwe.mitre.org/data/definitions/614.html"]},
-    "SRV-051": {"cwe": ["CWE-693"], "vulnerability": "Headers de segurança ausentes", "risk": "Superfície p/ XSS/clickjacking.", "remediation": "CSP, XFO, X-Content-Type-Options, HSTS.", "references": ["https://cwe.mitre.org/data/definitions/693.html"]},
-    "SRV-052": {"cwe": ["CWE-295"], "vulnerability": "TLS sem verificação", "risk": "MITM/exfiltração.", "remediation": "Sempre validar cert; sem verify=False.", "references": ["https://cwe.mitre.org/data/definitions/295.html"]},
-    "SRV-060": {"cwe": ["CWE-79"], "vulnerability": "XSS", "risk": "Roubo de sessão.", "remediation": "Escapar por contexto, CSP, sanitização.", "references": ["https://cwe.mitre.org/data/definitions/79.html"]},
-    "SRV-070": {"cwe": ["CWE-703"], "vulnerability": "Exceção genérica", "risk": "Oculta falhas e condições inseguras.", "remediation": "Capturar tipos específicos; fail-safe.", "references": ["https://cwe.mitre.org/data/definitions/703.html"]},
-    "SRV-071": {"cwe": ["CWE-215"], "vulnerability": "Debug/log verboso em prod", "risk": "Vazamento via logs/traces.", "remediation": "Desabilitar debug; scrubbing.", "references": ["https://cwe.mitre.org/data/definitions/215.html"]},
-    "SRV-072": {"cwe": ["CWE-200", "CWE-615"], "vulnerability": "Segredo em comentários", "risk": "Descoberta acidental.", "remediation": "Remover; hooks pre-commit; scan de segredos.", "references": ["https://cwe.mitre.org/data/definitions/200.html"]},
-    "SRV-080": {"cwe": ["CWE-200"], "vulnerability": "Paths sensíveis/adm expostos", "risk": "Facilita enumeração.", "remediation": "Proteger com auth/ACL; não logar paths internos.", "references": ["https://cwe.mitre.org/data/definitions/200.html"]},
-    "SRV-090": {"cwe": ["CWE-306"], "vulnerability": "Rota possivelmente sem autenticação", "risk": "Acesso não autenticado.", "remediation": "Aplicar decorators/filtros de auth.", "references": ["https://cwe.mitre.org/data/definitions/306.html"]},
-}
-
-# IDs especiais para regras "de arquivo" (sem linha específica)
-FILE_RULES_META = {
-    "DF-001": {"cwe": ["CWE-16"], "vulnerability": "Dockerfile sem HEALTHCHECK", "risk": "Menor detecção de falhas em runtime e health probes.", "remediation": "Adicionar instrução HEALTHCHECK adequada no Dockerfile.", "references": ["https://docs.docker.com/reference/dockerfile/#healthcheck"]},
+    "SRV-001": {
+        "cwe": ["CWE-798"],
+        "vulnerability": "Credenciais/API Keys hardcoded expostas no código",
+        "risk": "Exposição de segredos permite acesso não autorizado a serviços e dados (account/service takeover).",
+        "remediation": "Remover credenciais do código. Usar secret manager/variáveis de ambiente; rotacionar as chaves comprometidas; configurar CI/CD para injetar segredos em runtime.",
+        "references": [
+            "https://cwe.mitre.org/data/definitions/798.html",
+            "https://owasp.org/www-project-top-ten/2017/A3-Sensitive_Data_Exposure"
+        ],
+    },
+    "SRV-002": {
+        "cwe": ["CWE-321"],
+        "vulnerability": "Chave privada/certificado embutido no repositório",
+        "risk": "Permite impersonation, MITM e decriptação/tráfego forjado; comprometimento de infraestrutura.",
+        "remediation": "Nunca commit ar chaves/certs. Armazenar em vault; usar certificados dinâmicos/KMS; rotacionar imediatamente o par comprometido.",
+        "references": [
+            "https://cwe.mitre.org/data/definitions/321.html",
+            "https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html"
+        ],
+    },
+    "SRV-003": {
+        "cwe": ["CWE-798", "CWE-312"],
+        "vulnerability": "Atribuição de segredo sensível em texto plano",
+        "risk": "Vazamento acidental via VCS, logs ou pacotes; acesso não autorizado e pivoting.",
+        "remediation": "Mover segredos para gestão central (vault), remover do código, usar referências (env/secret manager) e revisão de commits anteriores.",
+        "references": ["https://cwe.mitre.org/data/definitions/312.html"],
+    },
+    "SRV-004": {
+        "cwe": ["CWE-200"],
+        "vulnerability": "Configuração de segredo vazio/nulo",
+        "risk": "Pode resultar em desativação involuntária de controles ou fallback inseguro, expondo dados.",
+        "remediation": "Validar obrigatoriedade e formato de segredos; falhar o build/deploy se ausente; usar policy as code.",
+        "references": ["https://cwe.mitre.org/data/definitions/200.html"],
+    },
+    "SRV-010": {
+        "cwe": ["CWE-601"],
+        "vulnerability": "Open Redirect",
+        "risk": "Phishing/chaining de ataques (roubo de sessão, bypass de filtros).",
+        "remediation": "Usar allowlist de domínios/caminhos; validar e normalizar destinos; evitar confiar em parâmetros do usuário.",
+        "references": ["https://cwe.mitre.org/data/definitions/601.html"],
+    },
+    "SRV-011": {
+        "cwe": ["CWE-20"],
+        "vulnerability": "Uso direto de parâmetros de entrada",
+        "risk": "Superfície para injeções e lógica insegura.",
+        "remediation": "Aplicar validação/normalização e tipagem; usar DTOs/binders seguros e validações server-side.",
+        "references": ["https://cwe.mitre.org/data/definitions/20.html"],
+    },
+    "SRV-020": {
+        "cwe": ["CWE-328", "CWE-327"],
+        "vulnerability": "Uso de hash/algoritmo criptográfico fraco (MD5/SHA1/etc.)",
+        "risk": "Quebra por colisão, preimage e cracking rápido; permissões de forja de assinaturas.",
+        "remediation": "Migrar para algoritmos modernos (SHA-256/512, bcrypt/Argon2 para senhas) com sal/custo apropriado.",
+        "references": ["https://cwe.mitre.org/data/definitions/327.html", "https://cwe.mitre.org/data/definitions/328.html"],
+    },
+    "SRV-021": {
+        "cwe": ["CWE-327"],
+        "vulnerability": "Uso de Base64 como 'criptografia'",
+        "risk": "Reversível sem segredo; exposição de dados sensíveis.",
+        "remediation": "Usar criptografia autenticada (AES-GCM/ChaCha20-Poly1305) com gestão de chaves segura.",
+        "references": ["https://cwe.mitre.org/data/definitions/327.html"],
+    },
+    "SRV-022": {
+        "cwe": ["CWE-327", "CWE-330"],
+        "vulnerability": "Pseudo-criptografia por operação aritmética/concatenada",
+        "risk": "Proteção ilusória; fácil engenharia reversa e vazamento.",
+        "remediation": "Usar bibliotecas criptográficas padrão; evitar 'homebrew crypto'.",
+        "references": ["https://cwe.mitre.org/data/definitions/330.html"],
+    },
+    "SRV-030": {
+        "cwe": ["CWE-89"],
+        "vulnerability": "SQL Injection",
+        "risk": "Exfiltração/modificação de dados, RCE via UDF/stacked queries.",
+        "remediation": "Usar queries parametrizadas/ORM, validar entrada, princípio de menor privilégio no DB.",
+        "references": ["https://cwe.mitre.org/data/definitions/89.html"],
+    },
+    "SRV-031": {
+        "cwe": ["CWE-94"],
+        "vulnerability": "Code Injection via eval/exec",
+        "risk": "Execução arbitrária de código; takeover do host.",
+        "remediation": "Remover eval/exec; usar mapeamentos seguros, whitelists e parsers; sandbox quando necessário.",
+        "references": ["https://cwe.mitre.org/data/definitions/94.html"],
+    },
+    "SRV-032": {
+        "cwe": ["CWE-78"],
+        "vulnerability": "Command Injection (SO)",
+        "risk": "Execução de comandos arbitrários, exfiltração e persistência.",
+        "remediation": "Usar APIs seguras (subprocess com lista/args), evitar shells, validar/escapar entradas.",
+        "references": ["https://cwe.mitre.org/data/definitions/78.html"],
+    },
+    "SRV-033": {
+        "cwe": ["CWE-78"],
+        "vulnerability": "Construção de comandos por concatenação",
+        "risk": "Facilita injeção de parâmetros controlados pelo usuário.",
+        "remediation": "Construir comandos por lista de argumentos sem shell; sanitizar dados.",
+        "references": ["https://cwe.mitre.org/data/definitions/78.html"],
+    },
+    "SRV-040": {
+        "cwe": ["CWE-22"],
+        "vulnerability": "Acesso a arquivo sem validação (Path Traversal)",
+        "risk": "Leitura de arquivos sensíveis fora do diretório esperado.",
+        "remediation": "Normalizar e restringir caminhos (allowlist), usar APIs que previnem traversal.",
+        "references": ["https://cwe.mitre.org/data/definitions/22.html"],
+    },
+    "SRV-041": {
+        "cwe": ["CWE-434"],
+        "vulnerability": "Upload sem restrições de tipo/validação",
+        "risk": "RCE via web shells, sobreposição de arquivos críticos.",
+        "remediation": "Validar MIME/assinatura, armazenar fora do webroot, renomear, dimensionar e varrer com AV.",
+        "references": ["https://cwe.mitre.org/data/definitions/434.html"],
+    },
+    "SRV-042": {
+        "cwe": ["CWE-548"],
+        "vulnerability": "Exposição por listagem de diretório",
+        "risk": "Revela estrutura/nomes de arquivos úteis para ataque.",
+        "remediation": "Desabilitar autoindex/listagem no servidor; usar index padrão.",
+        "references": ["https://cwe.mitre.org/data/definitions/548.html"],
+    },
+    "SRV-050": {
+        "cwe": ["CWE-614"],
+        "vulnerability": "Cookie de sessão sem atributo Secure",
+        "risk": "Roubo de sessão via sniffing em conexões não criptografadas.",
+        "remediation": "Definir Secure/HttpOnly/SameSite; exigir HTTPS em toda a aplicação.",
+        "references": ["https://cwe.mitre.org/data/definitions/614.html"],
+    },
+    "SRV-051": {
+        "cwe": ["CWE-693"],
+        "vulnerability": "Headers de segurança ausentes (menção)",
+        "risk": "Aumenta a superfície para XSS, clickjacking, etc.",
+        "remediation": "Aplicar CSP, X-Frame-Options, X-Content-Type-Options, HSTS; revisar política.",
+        "references": ["https://cwe.mitre.org/data/definitions/693.html"],
+    },
+    "SRV-052": {
+        "cwe": ["CWE-295"],
+        "vulnerability": "Verificação de certificado TLS desativada",
+        "risk": "MITM, ligação a endpoints maliciosos e exfiltração.",
+        "remediation": "Sempre validar certificados; pinning quando aplicável; não usar verify=False.",
+        "references": ["https://cwe.mitre.org/data/definitions/295.html"],
+    },
+    "SRV-060": {
+        "cwe": ["CWE-79"],
+        "vulnerability": "Cross-Site Scripting (XSS)",
+        "risk": "Roubo de sessão, defacement, pivot para outras contas.",
+        "remediation": "Escapar/encode por contexto, CSP, sanitização/templating seguro, evitar sinks perigosos.",
+        "references": ["https://cwe.mitre.org/data/definitions/79.html"],
+    },
+    "SRV-070": {
+        "cwe": ["CWE-703"],
+        "vulnerability": "Tratamento genérico de exceções",
+        "risk": "Oculta falhas e pode mascarar condições inseguras.",
+        "remediation": "Capturar exceções específicas, logar com parcimônia (sem segredos) e falhar de forma segura.",
+        "references": ["https://cwe.mitre.org/data/definitions/703.html"],
+    },
+    "SRV-071": {
+        "cwe": ["CWE-215"],
+        "vulnerability": "Modo debug/log verboso em produção",
+        "risk": "Exfiltração de dados sensíveis via logs/stack traces.",
+        "remediation": "Desabilitar debug em prod; ajustar níveis de log e scrubbing de dados.",
+        "references": ["https://cwe.mitre.org/data/definitions/215.html"],
+    },
+    "SRV-072": {
+        "cwe": ["CWE-200", "CWE-615"],
+        "vulnerability": "Segredo/senha em comentários",
+        "risk": "Descoberta acidental por terceiros e varredores.",
+        "remediation": "Remover comentários sensíveis, usar pre-commit hooks e scans de segredos na pipeline.",
+        "references": ["https://cwe.mitre.org/data/definitions/200.html"],
+    },
+    "SRV-080": {
+        "cwe": ["CWE-200"],
+        "vulnerability": "Menção a paths sensíveis/endpoints administrativos",
+        "risk": "Ajuda reconhecimento/enumeração, facilitando exploração.",
+        "remediation": "Proteger endpoints com auth/ACL, não expor paths internos em clientes/logs.",
+        "references": ["https://cwe.mitre.org/data/definitions/200.html"],
+    },
+    "SRV-090": {
+        "cwe": ["CWE-306"],
+        "vulnerability": "Rota possivelmente sem autenticação obrigatória",
+        "risk": "Acesso não autenticado a funções críticas.",
+        "remediation": "Aplicar decorators/filtros de autenticação/autorização nas rotas; testes de acesso.",
+        "references": ["https://cwe.mitre.org/data/definitions/306.html"],
+    },
 }
 
 # Pré-compila regex
@@ -172,6 +314,7 @@ def scan_file(path: str, rules: List[Dict], max_bytes: int) -> List[Dict]:
         return findings
 
     try:
+        # Leitura tolerante
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             lines = fh.readlines()
     except Exception as e:
@@ -190,7 +333,6 @@ def scan_file(path: str, rules: List[Dict], max_bytes: int) -> List[Dict]:
             "references": [],
         }]
 
-    # Regras genéricas por linha
     for idx, line in enumerate(lines, start=1):
         l = line.rstrip("\n")
         for rr in rules:
@@ -212,18 +354,6 @@ def scan_file(path: str, rules: List[Dict], max_bytes: int) -> List[Dict]:
                     "references": meta.get("references", []),
                 })
 
-    # Heurísticas específicas por tipo de arquivo
-    base = os.path.basename(path)
-    lower_base = base.lower()
-
-    # 1) Dockerfile (nome sem extensão)
-    if lower_base in {"dockerfile"} or lower_base.startswith("dockerfile"):
-        findings.extend(scan_dockerfile_specific(path, lines))
-
-    # 2) YAML (Kubernetes/Compose)
-    if lower_base.endswith(('.yaml', '.yml')) or path.lower().endswith(('.yaml', '.yml')):
-        findings.extend(scan_yaml_specific(path, lines))
-
     # Heurística: rotas sem autenticação (python)
     if path.endswith(".py"):
         findings.extend(detect_unauthenticated_routes(lines, path))
@@ -231,97 +361,11 @@ def scan_file(path: str, rules: List[Dict], max_bytes: int) -> List[Dict]:
     return dedup(findings)
 
 
-def scan_dockerfile_specific(path: str, lines: List[str]) -> List[Dict]:
-    out: List[Dict] = []
-    content = "\n".join(lines)
-
-    # DF-001: Sem HEALTHCHECK
-    if not re.search(r"^\s*HEALTHCHECK\b", content, re.IGNORECASE | re.MULTILINE):
-        meta = FILE_RULES_META["DF-001"]
-        out.append({
-            "rule_id": "DF-001",
-            "title": "Dockerfile sem HEALTHCHECK",
-            "severity": "LOW",
-            "file": path,
-            "line": 1,
-            "message": "Arquivo Dockerfile não contém instrução HEALTHCHECK.",
-            "snippet": "(arquivo)",
-            "vulnerability": meta["vulnerability"],
-            "risk": meta["risk"],
-            "remediation": meta["remediation"],
-            "cwe": meta["cwe"],
-            "references": meta["references"],
-        })
-
-    # Regras inline específicas comuns
-    docker_inline_rules = [
-        (r"^\s*FROM\s+.+:latest\b", "HIGH", "Uso de tag 'latest'", "CWE-16", "Imprevisibilidade na base da imagem.", "Fixar versão/tag imutável (ex.: :3.12).", ["https://docs.docker.com/develop/develop-images/dockerfile_best-practices/"] ),
-        (r"^\s*USER\s+root\b", "MEDIUM", "Execução como root", "CWE-250", "Amplia impacto de exploração.", "Criar e usar usuário não privilegiado (USER appuser).", ["https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#user"]),
-        (r"^\s*RUN\s+.*(curl|wget).*(\||;).*sh\b", "HIGH", "Execução de script remoto sem verificação", "CWE-494", "Injeção de conteúdo remoto sem integridade.", "Baixar com checksum/assinatura e não pipe para shell diretamente.", ["https://cwe.mitre.org/data/definitions/494.html"]) ,
-        (r"^\s*RUN\s+.*chmod\s+777\b", "MEDIUM", "Permissões excessivas (chmod 777)", "CWE-732", "Amplia superfície e abuso de arquivos.", "Restringir permissões mínimas necessárias.", ["https://cwe.mitre.org/data/definitions/732.html"]) ,
-        (r"^\s*ADD\s+https?://", "MEDIUM", "ADD de URL remota", "CWE-494", "Download implícito sem verificação.", "Prefira curl/wget com verificação e COPY para arquivos locais.", ["https://docs.docker.com/reference/dockerfile/#add"]) ,
-        (r"^\s*ENV\s+.*(TOKEN|PASSWORD|API_KEY|SECRET|ACCESS_KEY)\s*=\s*\S+", "HIGH", "Segredo em ENV", "CWE-798", "Vazamento de segredo em imagem/camadas.", "Usar secrets no build/args + secret manager; evitar persistir no layer.", ["https://cwe.mitre.org/data/definitions/798.html"]) ,
-    ]
-
-    for idx, line in enumerate(lines, start=1):
-        for pattern, sev, title, cwe, risk, rem, refs in docker_inline_rules:
-            if re.search(pattern, line, re.IGNORECASE):
-                out.append({
-                    "rule_id": "DF-ILINE",
-                    "title": title,
-                    "severity": sev,
-                    "file": path,
-                    "line": idx,
-                    "message": f"Possível ocorrência: {title}",
-                    "snippet": truncate(line.strip()),
-                    "vulnerability": title,
-                    "risk": risk,
-                    "remediation": rem,
-                    "cwe": [cwe],
-                    "references": refs,
-                })
-    return out
-
-
-def scan_yaml_specific(path: str, lines: List[str]) -> List[Dict]:
-    out: List[Dict] = []
-    yaml_inline_rules = [
-        (r"\bprivileged:\s*true\b", "HIGH", "Container privilegiado", "CWE-250", "Escala privilégios dentro do host.", "Evitar privileged; usar capabilities estritamente necessárias.", ["https://kubernetes.io/docs/concepts/security/pod-security-standards/"] ),
-        (r"\brunAsUser:\s*0\b", "HIGH", "Execução como root (K8s)", "CWE-250", "Root no container amplia impacto.", "Executar como UID não privilegiado e setar runAsNonRoot: true.", ["https://kubernetes.io/docs/tasks/configure-pod-container/security-context/"] ),
-        (r"\ballowPrivilegeEscalation:\s*true\b", "HIGH", "Permite escalonamento de privilégio", "CWE-250", "Aumenta superfície de abuso.", "Definir allowPrivilegeEscalation: false.", ["https://kubernetes.io/docs/concepts/security/pod-security-standards/"] ),
-        (r"\bhostNetwork:\s*true\b", "MEDIUM", "hostNetwork habilitado", "CWE-668", "Exposição de rede do host.", "Evitar hostNetwork salvo necessidade estrita.", ["https://kubernetes.io/docs/concepts/security/pod-security-standards/"] ),
-        (r"\bhostPID:\s*true\b", "MEDIUM", "hostPID habilitado", "CWE-668", "Acesso ao namespace de processos do host.", "Manter isolado; desabilitar hostPID.", ["https://kubernetes.io/docs/concepts/security/pod-security-standards/"] ),
-        (r"\bhostIPC:\s*true\b", "MEDIUM", "hostIPC habilitado", "CWE-668", "Acesso ao IPC do host.", "Desabilitar hostIPC.", ["https://kubernetes.io/docs/concepts/security/pod-security-standards/"] ),
-        (r"\bimage:\s+\S+:latest\b", "MEDIUM", "Uso de imagem com tag latest", "CWE-16", "Builds não reprodutíveis e drift de segurança.", "Fixar tag/sha digest.", ["https://kubernetes.io/docs/concepts/containers/images/"] ),
-        (r"\benv:\s*\n(?:\s*-\s*name:\s*(?:TOKEN|PASSWORD|API_KEY|SECRET|ACCESS_KEY)\s*\n\s*value:\s*\S+)", "HIGH", "Segredo em env (YAML)", "CWE-798", "Vazamento de segredo pelo manifesto.", "Usar Secret/External Secret e referenciar via valueFrom/secretKeyRef.", ["https://kubernetes.io/docs/concepts/configuration/secret/"] ),
-    ]
-
-    for idx, line in enumerate(lines, start=1):
-        for pattern, sev, title, cwe, risk, rem, refs in yaml_inline_rules:
-            if re.search(pattern, "\n".join(lines[max(0, idx-3): idx+3]), re.IGNORECASE | re.MULTILINE):
-                out.append({
-                    "rule_id": "YAML-ILINE",
-                    "title": title,
-                    "severity": sev,
-                    "file": path,
-                    "line": idx,
-                    "message": f"Possível ocorrência: {title}",
-                    "snippet": truncate(lines[idx-1].strip()),
-                    "vulnerability": title,
-                    "risk": risk,
-                    "remediation": rem,
-                    "cwe": [cwe],
-                    "references": refs,
-                })
-
-    return out
-
-
 def dedup(findings: List[Dict]) -> List[Dict]:
     seen = set()
     out = []
     for f in findings:
-        key = (f.get("file"), f.get("line"), f.get("rule_id"), f.get("title"), f.get("snippet", ""))
+        key = (f["file"], f["line"], f["rule_id"], f.get("snippet", ""))
         if key not in seen:
             seen.add(key)
             out.append(f)
@@ -364,10 +408,6 @@ def walk_files(root: str, exts: Iterable[str], skip_dirs: Iterable[str]) -> Iter
             full = os.path.join(r, f)
             if should_skip(full, skip_dirs):
                 continue
-            base = os.path.basename(full)
-            if base in TEXT_ONLY_BASENAMES or base.lower().startswith("dockerfile"):
-                yield full
-                continue
             if f.lower().endswith(exts):
                 yield full
 
@@ -405,7 +445,7 @@ def to_sarif(findings: List[Dict]) -> Dict:
     for f in findings:
         rid = f["rule_id"]
         if rid not in rules_map:
-            meta = RULE_META.get(rid, FILE_RULES_META.get(rid, {}))
+            meta = RULE_META.get(rid, {})
             rules_map[rid] = {
                 "id": rid,
                 "name": f.get("title", rid),
@@ -447,7 +487,7 @@ def to_sarif(findings: List[Dict]) -> Dict:
         "runs": [{
             "tool": {
                 "driver": {
-                    "name": "Custom Security Review (enhanced, text-aware)",
+                    "name": "Custom Security Review (enhanced)",
                     "informationUri": "https://example.local/custom-security-review",
                     "rules": list(rules_map.values())
                 }
@@ -459,6 +499,7 @@ def to_sarif(findings: List[Dict]) -> Dict:
 
 
 def write_csv(findings: List[Dict], csv_path: str) -> None:
+    """Escreve CSV com colunas estendidas."""
     fieldnames = [
         "Rule ID", "Severity", "File", "Line", "Message", "Snippet",
         "Vulnerability", "Risk", "Remediation", "CWE", "References"
@@ -483,7 +524,7 @@ def write_csv(findings: List[Dict], csv_path: str) -> None:
 
 
 def main():
-    ap = argparse.ArgumentParser("custom_security_review_enhanced_text")
+    ap = argparse.ArgumentParser("custom_security_review_enhanced")
     ap.add_argument("--root", default=".", help="Diretório raiz do projeto")
     ap.add_argument("--json-out", default="custom-review.json", help="Arquivo JSON de saída")
     ap.add_argument("--sarif-out", default="custom-review.sarif", help="Arquivo SARIF 2.1.0 de saída")
@@ -503,6 +544,7 @@ def main():
         all_findings.extend(scan_file(p, RULES, max_bytes))
     all_findings = dedup(all_findings)
 
+    # Saídas
     with open(args.json_out, "w", encoding="utf-8") as fj:
         json.dump(to_json(all_findings), fj, ensure_ascii=False, indent=2)
 
@@ -517,6 +559,7 @@ def main():
     print(f"[custom-review] encontrados {total} achados -> {counts}")
 
     if args.fail_on:
+        # Se existir qualquer achado >= fail_on -> exit 1
         if any(sev_gte(s, args.fail_on) and c > 0 for s, c in counts.items()):
             sys.exit(1)
 
