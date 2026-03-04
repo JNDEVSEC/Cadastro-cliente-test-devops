@@ -108,20 +108,21 @@ jobs:
             echo "succeeded=false" >> "$GITHUB_OUTPUT"
           fi
 
-     # --- TRIVY: Image (só se o build suceder) ---
-      - name: Trivy Image scan (SARIF)
+      # --- TRIVY: Image (só se o build suceder) ---
+      - name: Trivy Image scan (SARIF - CVEs)
         if: ${{ steps.dfile.outputs.found == 'true' && steps.buildimg.outputs.succeeded == 'true' }}
         uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: local/test-insecure:${{ github.sha }}
+          scanners: 'vuln'            # foco em CVEs da imagem
+          vuln-type: 'os,library'     # SO + libs dentro da imagem
           format: 'sarif'
           output: 'trivy-image.sarif'
-          # inclui UNKNOWN para não perder findings com severidade desconhecida
           severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'
           ignore-unfixed: true
           exit-code: '0'
         continue-on-error: true
-      
+
       - name: Upload Trivy Image SARIF (artifact)
         if: ${{ hashFiles('trivy-image.sarif') != '' }}
         uses: actions/upload-artifact@v4
@@ -129,7 +130,7 @@ jobs:
           name: trivy-image-sarif
           path: trivy-image.sarif
           if-no-files-found: ignore
-      
+
       - name: Upload Trivy Image SARIF to Code Scanning
         if: ${{ hashFiles('trivy-image.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
@@ -137,43 +138,66 @@ jobs:
           sarif_file: trivy-image.sarif
           category: sca-trivy-image
         continue-on-error: true
-      
+
       # --- TRIVY: FS (ignora scripts/ via .trivyignore) ---
       - name: Create .trivyignore (ignore scripts/)
         run: |
           echo "scripts/" >> .trivyignore
-      
-      - name: Trivy FS scan (repo -> SARIF)
+
+      # FS 1/2 — Vulnerabilities (CVEs)
+      - name: Trivy FS scan (SARIF - CVEs)
         uses: aquasecurity/trivy-action@0.24.0
         with:
           scan-type: 'fs'
           scan-ref: '.'
+          scanners: 'vuln'
+          vuln-type: 'os,library'      # necessário para pegar dependências de app
           format: 'sarif'
-          output: 'trivy-fs.sarif'
-          severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'  # inclui UNKNOWN
+          output: 'trivy-fs-vuln.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'
           ignore-unfixed: true
           exit-code: '0'
         continue-on-error: true
-      
-      - name: Upload Trivy FS SARIF
-        if: ${{ hashFiles('trivy-fs.sarif') != '' }}
+
+      - name: Upload Trivy FS CVEs SARIF
+        if: ${{ hashFiles('trivy-fs-vuln.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: trivy-fs.sarif
-          category: sca-trivy-fs
+          sarif_file: trivy-fs-vuln.sarif
+          category: sca-trivy-fs-vuln
         continue-on-error: true
 
-      # --- TRIVY: Config (IaC: Dockerfile/Compose) ---
+      # FS 2/2 — Secrets
+      - name: Trivy FS scan (SARIF - Secrets)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'secret'
+          format: 'sarif'
+          output: 'trivy-fs-secrets.sarif'
+          exit-code: '0'
+        continue-on-error: true
+
+      - name: Upload Trivy FS Secrets SARIF
+        if: ${{ hashFiles('trivy-fs-secrets.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-fs-secrets.sarif
+          category: secrets-trivy-fs
+        continue-on-error: true
+
+      # --- TRIVY: Config (IaC) — somente misconfig/IaC ---
       - name: Trivy Config scan (Dockerfile/IaC -> SARIF)
         uses: aquasecurity/trivy-action@0.24.0
         with:
           scan-type: 'config'
           scan-ref: '.'
+          scanners: 'config'           # separar de secrets
           format: 'sarif'
           output: 'trivy-config.sarif'
           ignore-unfixed: true
           exit-code: '0'
-          scanners: 'config,secret'
         continue-on-error: true
 
       - name: Upload Trivy Config SARIF
@@ -231,7 +255,8 @@ jobs:
             semgrep.report.json
             semgrep.sarif
             trivy-image.sarif
-            trivy-fs.sarif
+            trivy-fs-vuln.sarif
+            trivy-fs-secrets.sarif
             trivy-config.sarif
             custom-review.json
             custom-review.sarif
