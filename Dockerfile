@@ -1,18 +1,14 @@
-# Dockerfile (propósito: achados com Alpine)
+# Base mais antiga para forçar CVEs
+FROM alpine:3.12
 
-# [MISCONFIG] Tag 'latest'
-FROM alpine:latest
-
-# [MISCONFIG] Secrets em ENV
-ENV TOKEN=plaintext-12345 \
-    API_KEY=hardcoded-abc-xyz \
+# Segredos com padrões realistas
+ENV GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCDE \
+    AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE \
+    AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
     DEBUG=true
 
-# [MISCONFIG] Usuário root (padrão)
 USER root
 
-# [VULN] Instala pacotes com versões possivelmente vulneráveis
-# (As versões variam; ainda assim Trivy costuma apontar CVEs)
 RUN apk add --no-cache \
       openssl \
       busybox \
@@ -20,17 +16,10 @@ RUN apk add --no-cache \
       wget \
       git || true
 
-# [MISCONFIG] Executa script remoto sem verificação
 RUN wget -qO- http://example.com/install.sh | sh || true
-
-# [MISCONFIG] Permissões fracas
 RUN mkdir -p /var/app && chmod 777 /var/app
 
 WORKDIR /var/app
 COPY . .
-
-# [MISCONFIG] Porta exposta
 EXPOSE 8080
-
-# [MISCONFIG] Sem HEALTHCHECK
 CMD ["sh", "-c", "echo App rodando como root; sleep 3600"]
