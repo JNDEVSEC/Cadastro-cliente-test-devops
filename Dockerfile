@@ -34,4 +34,3 @@ EXPOSE 8080
 
 # [MISCONFIG] Sem HEALTHCHECK
 CMD ["sh", "-c", "echo App rodando como root; sleep 3600"]
-``
