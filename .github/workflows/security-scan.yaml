@@ -204,7 +204,6 @@ jobs:
         with:
           scan-type: 'config'
           scan-ref: '.'
-          scanners: 'config'
           format: 'sarif'
           output: 'trivy-config.sarif'
           ignore-unfixed: true
@@ -229,7 +228,7 @@ jobs:
         with:
           scan-type: 'config'
           scan-ref: '${{ steps.dfile.outputs.path }}'
-          scanners: 'config,secret'
+          
           format: 'sarif'
           output: 'trivy-config-dockerfile.sarif'
           exit-code: '0'
