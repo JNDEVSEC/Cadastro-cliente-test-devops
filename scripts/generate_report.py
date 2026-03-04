@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Relatório de Segurança (Corporate) — ENHANCED
+- Capa corporativa com logo, empresa, datas e metadados do pipeline.
+- Sumário (TOC), Resumo executivo com gráficos, e seções por tipo: SCA, SAST, IaC, SECRETS.
+- Integra: Semgrep (JSON), Custom Review (JSON enhanced), Trivy Image (SARIF),
+  Trivy FS Vulnerabilities (SARIF), Trivy FS Secrets (SARIF), Trivy Config (SARIF),
+  e opcionalmente Trivy Config (Dockerfile específico) se presente.
+- Mostra por achado: severidade, localização, mensagem, vulnerabilidade explorável, risco e correção.
+"""
+
 import json
 import os
 from datetime import datetime
@@ -27,11 +37,13 @@ import matplotlib.pyplot as plt
 # -------------------------------
 REPORT_PATH = "security-report.pdf"
 
-SEM_GREP_JSON   = "semgrep.json"
-CUSTOM_JSON     = "custom-review.json"
-TRIVY_IMG_SARIF = "trivy-image.sarif"
-TRIVY_FS_SARIF  = "trivy-fs.sarif"
-TRIVY_CFG_SARIF = "trivy-config.sarif"  # IaC
+SEM_GREP_JSON     = "semgrep.json"
+CUSTOM_JSON       = "custom-review.json"
+TRIVY_IMG_SARIF   = "trivy-image.sarif"
+TRIVY_FS_VULN     = "trivy-fs-vuln.sarif"
+TRIVY_FS_SECRETS  = "trivy-fs-secrets.sarif"
+TRIVY_CFG_SARIF   = "trivy-config.sarif"  # IaC geral
+TRIVY_CFG_DOCKER  = "trivy-config-dockerfile.sarif"  # IaC (Dockerfile específico, opcional)
 
 CHART_DIR = "charts"
 os.makedirs(CHART_DIR, exist_ok=True)
@@ -64,8 +76,7 @@ def load_json(path: str):
         return None
 
 def escape_xml(s: str) -> str:
-    # Escape ONLY content — do not escape tags we use in Paragraph
-    return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def sev_color_hex(level: str) -> str:
     COLORS = {
@@ -75,48 +86,54 @@ def sev_color_hex(level: str) -> str:
         "LOW":      "1E90FF",
         "INFO":     "666666",
     }
-    return COLORS.get(level.upper(), "000000")
+    return COLORS.get((level or "").upper(), "000000")
 
 def human_date_utc() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
 # -------------------------------
-# Normalization
+# Normalization helpers
 # -------------------------------
-def summarize_semgrep(js: Dict) -> Dict[str, int]:
-    counts = {k: 0 for k in SEVERITIES}
-    if not js:
-        return counts
-    for r in js.get("results", []):
-        sev = (r.get("extra", {}).get("severity") or "").upper()
+
+def summarize_by_sev(items: List[Dict[str,Any]]) -> Dict[str,int]:
+    counts = {k:0 for k in SEVERITIES}
+    for r in items:
+        sev = (r.get("severity") or "").upper()
         if sev in counts:
             counts[sev] += 1
     return counts
+
+# --- Semgrep JSON ---
+
+def summarize_semgrep(js: Dict) -> Dict[str, int]:
+    return summarize_by_sev(normalize_semgrep(js))
 
 def normalize_semgrep(js: Dict) -> List[Dict[str, Any]]:
     out = []
     if not js:
         return out
     for r in js.get("results", []):
+        sev = (r.get("extra", {}).get("severity") or "").upper()
         out.append({
             "src": "Semgrep",
+            "type": "SAST",
             "rule_id": r.get("check_id", ""),
-            "severity": (r.get("extra", {}).get("severity") or "").upper(),
+            "severity": sev,
             "location": f"{r.get('path','')}:{(r.get('start') or {}).get('line','')}",
             "message": r.get("extra", {}).get("message", "") or "",
+            "vulnerability": r.get("extra", {}).get("metadata", {}).get("vulnerability", ""),
+            "risk": r.get("extra", {}).get("metadata", {}).get("impact", ""),
+            "remediation": r.get("extra", {}).get("metadata", {}).get("fix", ""),
+            "cwe": r.get("extra", {}).get("metadata", {}).get("cwe", []),
+            "references": r.get("extra", {}).get("metadata", {}).get("references", []),
             "raw": r
         })
     return out
 
+# --- Custom JSON (enhanced) ---
+
 def summarize_custom(js: Dict) -> Dict[str, int]:
-    counts = {k: 0 for k in SEVERITIES}
-    if not js:
-        return counts
-    for r in js.get("results", []):
-        sev = (r.get("severity") or "").upper()
-        if sev in counts:
-            counts[sev] += 1
-    return counts
+    return summarize_by_sev(normalize_custom(js))
 
 def normalize_custom(js: Dict) -> List[Dict[str, Any]]:
     out = []
@@ -125,96 +142,135 @@ def normalize_custom(js: Dict) -> List[Dict[str, Any]]:
     for r in js.get("results", []):
         out.append({
             "src": "Custom",
+            "type": "SAST",
             "rule_id": r.get("rule_id", ""),
             "severity": (r.get("severity") or "").upper(),
             "location": f"{r.get('file','')}:{r.get('line','')}",
             "message": r.get("message", "") or "",
+            "vulnerability": r.get("vulnerability", ""),
+            "risk": r.get("risk", ""),
+            "remediation": r.get("remediation", ""),
+            "cwe": r.get("cwe", []),
+            "references": r.get("references", []),
             "raw": r
         })
     return out
 
-def sarif_results(path: str) -> List[Dict[str, Any]]:
+# --- SARIF (Trivy e outros) ---
+
+def sarif_runs(path: str) -> List[Dict[str, Any]]:
     sarif = load_json(path)
     if not sarif:
         return []
-    out = []
-    for run in sarif.get("runs", []):
+    return sarif.get("runs", [])
+
+
+def sarif_results_with_rules(path: str) -> List[Dict[str, Any]]:
+    runs = sarif_runs(path)
+    out: List[Dict[str,Any]] = []
+    for run in runs:
         rules_index = {}
-        rules = run.get("tool", {}).get("driver", {}).get("rules", [])
-        for rule in rules:
+        driver = (run.get("tool", {}) or {}).get("driver", {})
+        for rule in (driver.get("rules") or []):
             rid = rule.get("id")
             if rid:
                 rules_index[rid] = rule
-        for res in run.get("results", []):
+        for res in (run.get("results") or []):
             rid   = res.get("ruleId", "")
-            level = res.get("level", "note")
             msg   = (res.get("message", {}) or {}).get("text", "") or ""
             locs  = res.get("locations", []) or []
             uri   = ""
             if locs:
                 uri = (locs[0].get("physicalLocation", {}).get("artifactLocation", {}).get("uri") or "")
-            rule  = rules_index.get(rid, {})
-            props = rule.get("properties", {}) if isinstance(rule, dict) else {}
-            sev   = (props.get("security-severity") or props.get("problem.severity") or props.get("severity") or "").upper()
+                start_line = (locs[0].get("physicalLocation", {}).get("region", {}) or {}).get("startLine", "")
+                if start_line:
+                    uri = f"{uri}:{start_line}"
+            # Severity: preferir result.properties se existir
+            sev = (res.get("properties", {}) or {}).get("problem.severity", "")
             if not sev:
-                sev = {"ERROR":"HIGH","WARNING":"MEDIUM","NOTE":"LOW"}.get(level.upper(), "LOW")
+                # fallback para rule.properties ou nível
+                rule = rules_index.get(rid, {})
+                props = rule.get("properties", {}) if isinstance(rule, dict) else {}
+                sev   = (props.get("problem.severity") or props.get("security-severity") or props.get("severity") or "").upper()
+            sev = (sev or "").upper() or {"ERROR":"HIGH","WARNING":"MEDIUM","NOTE":"LOW"}.get((res.get("level") or "").upper(), "LOW")
+
+            # Extra: tentar capturar help e referências
+            rule = rules_index.get(rid, {})
+            help_text = ""
+            if isinstance(rule, dict):
+                help_obj = rule.get("help", {})
+                help_text = help_obj.get("markdown") or help_obj.get("text") or ""
+            # propriedades (CWE, etc.)
+            props_res = res.get("properties", {}) or {}
+            props_rule = rule.get("properties", {}) if isinstance(rule, dict) else {}
+
             out.append({
                 "rule_id": rid,
                 "severity": sev,
                 "location": uri,
                 "message": msg,
-                "raw": res
+                "help": help_text,
+                "cwe": props_res.get("cwe") or props_rule.get("cwe") or [],
+                "vulnerability": props_res.get("vulnerability", ""),
+                "risk": props_res.get("risk", ""),
+                "remediation": props_res.get("remediation", ""),
+                "references": props_res.get("references", []) or props_rule.get("tags", []),
+                "raw": res,
             })
     return out
 
-def normalize_trivy_image() -> Tuple[List[Dict], Dict[str,int]]:
-    res = sarif_results(TRIVY_IMG_SARIF)
-    counts = {k:0 for k in SEVERITIES}
-    for r in res:
-        if r["severity"] in counts: counts[r["severity"]] += 1
-    for r in res: r["src"] = "Trivy Image"
-    return res, counts
 
-def normalize_trivy_fs() -> Tuple[List[Dict], Dict[str,int]]:
-    res = sarif_results(TRIVY_FS_SARIF)
-    counts = {k:0 for k in SEVERITIES}
+def normalize_trivy_image() -> Tuple[List[Dict], Dict[str,int]]:
+    res = sarif_results_with_rules(TRIVY_IMG_SARIF)
     for r in res:
-        if r["severity"] in counts: counts[r["severity"]] += 1
-    for r in res: r["src"] = "Trivy FS"
-    return res, counts
+        r["src"] = "Trivy Image"
+        r["type"] = "SCA"
+    return res, summarize_by_sev(res)
+
+
+def normalize_trivy_fs_vuln() -> Tuple[List[Dict], Dict[str,int]]:
+    res = sarif_results_with_rules(TRIVY_FS_VULN)
+    for r in res:
+        r["src"] = "Trivy FS (Vulns)"
+        r["type"] = "SCA"
+    return res, summarize_by_sev(res)
+
+
+def normalize_trivy_fs_secrets() -> Tuple[List[Dict], Dict[str,int]]:
+    res = sarif_results_with_rules(TRIVY_FS_SECRETS)
+    for r in res:
+        r["src"] = "Trivy FS (Secrets)"
+        r["type"] = "SECRETS"
+        # Se não houver 'risk'/'remediation', preencher genéricos
+        r.setdefault("risk", "Exposição de segredo pode permitir acesso não autorizado a serviços e dados.")
+        r.setdefault("remediation", "Remover segredo do repositório; usar secret manager/variáveis de ambiente e rotacionar chaves.")
+    return res, summarize_by_sev(res)
+
 
 def normalize_trivy_cfg() -> Tuple[List[Dict], Dict[str,int]]:
-    res = sarif_results(TRIVY_CFG_SARIF)
-    counts = {k:0 for k in SEVERITIES}
+    res = sarif_results_with_rules(TRIVY_CFG_SARIF)
     for r in res:
-        if r["severity"] in counts: counts[r["severity"]] += 1
-    for r in res: r["src"] = "Trivy Config"
-    return res, counts
+        r["src"] = "Trivy Config"
+        r["type"] = "IaC"
+    # Dockefile específico (opcional)
+    if os.path.exists(TRIVY_CFG_DOCKER):
+        extra = sarif_results_with_rules(TRIVY_CFG_DOCKER)
+        for r in extra:
+            r["src"] = "Trivy Config (Dockerfile)"
+            r["type"] = "IaC"
+        res.extend(extra)
+    return res, summarize_by_sev(res)
 
 # -------------------------------
-# Type classification (SCA/SAST/IaC)
+# Type classification (SCA/SAST/IaC/SECRETS)
 # -------------------------------
-def classify_type(src: str, rule_id: str, message: str) -> str:
-    rid = (rule_id or "").upper()
-    s = (src or "").lower()
 
-    if "trivy config" in s:
-        return "IaC"
-
-    if rid.startswith("CVE-"):
-        return "SCA"
-
-    if s in ("semgrep", "custom"):
-        return "SAST"
-
-    if "trivy image" in s or "trivy fs" in s:
-        return "SCA"
-
-    return "SAST"
+TYPES = ["SCA", "SAST", "IaC", "SECRETS"]
 
 # -------------------------------
-# Risk & Fix
+# Risk & Fix (fallbacks)
 # -------------------------------
+
 def risk_text(sev: str) -> str:
     m = {
         "CRITICAL": "Risco crítico: exploração pode causar comprometimento total, exfiltração de dados ou RCE sem interação.",
@@ -223,7 +279,8 @@ def risk_text(sev: str) -> str:
         "LOW":      "Risco baixo: difícil de explorar ou impacto limitado; ainda assim recomenda-se correção.",
         "INFO":     "Informativo: melhoria recomendada, sem evidência de risco imediato."
     }
-    return m.get(sev.upper(), "Risco não classificado.")
+    return m.get((sev or "").upper(), "Risco não classificado.")
+
 
 def recommend_fix(tp: str, rule_id: str, message: str, location: str) -> str:
     txt = (message or "").lower()
@@ -232,41 +289,44 @@ def recommend_fix(tp: str, rule_id: str, message: str, location: str) -> str:
         if "verify=false" in txt or "ssl.verify=false" in txt:
             return "Habilite verificação de certificado TLS (verify=True) e valide CA/hostnames."
         if "md5" in txt or "sha1" in txt:
-            return "Substitua MD5/SHA1 por SHA-256/512 com sal; use libs modernas (bcrypt/Argon2/PBKDF2 para senhas)."
+            return "Substitua MD5/SHA1 por SHA-256/512; para senhas use bcrypt/Argon2/PBKDF2 com sal/custo."
         if "eval(" in txt or "exec(" in txt or "function(" in txt:
             return "Remova eval/exec; use parsing seguro/dispatch controlado; sanitize entradas."
         if "os.system" in txt or "subprocess.popen" in txt or "runtime.getruntime().exec" in txt:
-            return "Evite shell + concatenação; use listas (subprocess.run([...], check=True)) e sanitize argumentos."
-        if "innerhtml" in txt or "document.write" in txt or "script" in txt or "dangerouslysetinnerhtml" in txt:
-            return "Mitigue XSS: sanitize/escape, templates seguros, CSP adequada; evitar HTML bruto."
+            return "Evite shell/concentração; use subprocess com lista de argumentos e sanitize."
+        if "innerhtml" in txt or "document.write" in txt or "<script>" in txt or "dangerouslysetinnerhtml" in txt:
+            return "Mitigue XSS: sanitize/escape por contexto, templates seguros e CSP."
         if "select * from" in txt or ("where" in txt and ("$" in txt or "+" in txt)):
             return "Use queries parametrizadas; não concatene entrada de usuário em SQL."
         if rid.startswith("SRV-050"):
             return "Defina session.cookie_secure=True e configure HttpOnly/SameSite."
         if rid.startswith("SRV-041"):
-            return "Restrinja uploads: tipo, tamanho, varredura de malware, armazenamento e validação de conteúdo."
+            return "Restringir uploads: tipo, tamanho, antivírus e armazenamento seguro fora do webroot."
         return "Aplique correção específica da regra; valide entrada e minimize privilégios."
     if tp == "SCA":
         if rid.startswith("CVE-"):
-            return "Atualize o pacote afetado para versão corrigida; aplique patches da distribuição; use pinning de versões."
+            return "Atualize o pacote afetado para versão corrigida; aplique patches da distribuição; fixe versões."
         return "Atualize dependências vulneráveis; gere SBOM e monitore CVEs continuamente."
     if tp == "IaC":
         if "root" in txt:
-            return "Evite rodar como root: crie usuário dedicado e defina USER não-root; ajuste permissões."
+            return "Evite rodar como root: crie usuário dedicado (USER) e ajuste permissões."
         if "latest" in txt:
-            return "Evite a tag 'latest'; pinne versões de base/pacotes para builds reprodutíveis."
+            return "Evite tag 'latest'; fixe versões/digests para builds reprodutíveis."
         if "add " in txt and "http" in txt:
-            return "Evite ADD de URLs/HTTP; prefira COPY e downloads verificados (HTTPS + checksum/assinatura)."
+            return "Evite ADD de URLs; prefira COPY e downloads verificados (HTTPS + checksum)."
         if "777" in txt or "world-writable" in txt:
             return "Evite permissões 777; use privilégios mínimos (ex.: 640/750)."
         if "healthcheck" in txt:
-            return "Adicione HEALTHCHECK para liveness/readiness (ex.: curl -f /health || exit 1)."
-        return "Aplique hardening: least privilege, versões fixas, validação e segurança de cadeia de supply."
+            return "Adicione HEALTHCHECK adequado (ex.: curl -f /health || exit 1)."
+        return "Aplique hardening: least privilege, versões fixas, validação e segurança da cadeia de supply."
+    if tp == "SECRETS":
+        return "Remover segredo do repositório; migrar para secret manager/variáveis de ambiente e rotacionar chaves afetadas."
     return "Aplique correção específica conforme o contexto do achado."
 
 # -------------------------------
 # Charts
 # -------------------------------
+
 def chart_overall(counts_by_type: Dict[str, Dict[str,int]], out_path: str):
     totals = {s:0 for s in SEVERITIES}
     for tcounts in counts_by_type.values():
@@ -283,6 +343,7 @@ def chart_overall(counts_by_type: Dict[str, Dict[str,int]], out_path: str):
     fig.tight_layout()
     fig.savefig(out_path, dpi=160)
     plt.close(fig)
+
 
 def chart_by_type(counts_by_type: Dict[str, Dict[str,int]], out_path: str):
     types = list(counts_by_type.keys())
@@ -307,6 +368,7 @@ def chart_by_type(counts_by_type: Dict[str, Dict[str,int]], out_path: str):
 # -------------------------------
 # Layout: capa + páginas internas
 # -------------------------------
+
 def draw_header_footer(canvas, doc):
     canvas.saveState()
     # Cabeçalho
@@ -326,20 +388,19 @@ def draw_header_footer(canvas, doc):
     canvas.drawString(A4[0] - doc.rightMargin - w, doc.bottomMargin - 14, page_text)
     canvas.restoreState()
 
+
 def draw_cover(canvas, doc):
     # Capa sem header/footer
     pass
 
+
 class CorporateDoc(BaseDocTemplate):
     def __init__(self, filename, **kw):
         super().__init__(filename, **kw)
-        # Frame padrão
         frame = Frame(self.leftMargin, self.bottomMargin, self.width, self.height, id='frame')
-        # Templates: capa (sem header) e páginas (com header/footer)
         cover_tmpl = PageTemplate(id='cover', frames=[frame], onPage=draw_cover)
         page_tmpl  = PageTemplate(id='page',  frames=[frame], onPage=draw_header_footer)
         self.addPageTemplates([cover_tmpl, page_tmpl])
-        # TOC
         self._toc = TableOfContents()
         self._toc.levelStyles = [
             ParagraphStyle(fontName='Helvetica-Bold', fontSize=12, name='TOCHeading1',
@@ -352,6 +413,7 @@ class CorporateDoc(BaseDocTemplate):
         if isinstance(flowable, Paragraph) and hasattr(flowable, "toc_level") and hasattr(flowable, "toc_text"):
             self.notify('TOCEntry', (flowable.toc_level, flowable.toc_text, self.page))
 
+
 def make_heading(text: str, level: int, styles) -> Paragraph:
     style_name = "H1" if level == 1 else "H2"
     p = Paragraph(text, styles[style_name])
@@ -362,26 +424,47 @@ def make_heading(text: str, level: int, styles) -> Paragraph:
 # -------------------------------
 # Findings rendering
 # -------------------------------
-def bullet_for_finding(styles, tp: str, rule_id: str, severity: str, location: str, message: str) -> ListItem:
-    head = f"[{severity}] <b>{escape_xml(rule_id or 'N/A')}</b> — <i>{escape_xml(tp)}</i>"
-    loc  = f"{escape_xml(location or '')}"
-    msg  = escape_xml(message or "")
-    risk = risk_text(severity)
-    fix  = recommend_fix(tp, rule_id, message, location)
-    html = (
-        f"<font color='#{sev_color_hex(severity)}'>{head}</font><br/>"
-        f"{loc}<br/>"
-        f"{msg}<br/>"
-        f"<b>Risco:</b> {escape_xml(risk)}<br/>"
-        f"<b>Correção recomendada:</b> {escape_xml(fix)}"
-    )
+
+def bullet_for_finding(styles, tp: str, it: Dict[str,Any]) -> ListItem:
+    rule_id  = it.get("rule_id") or 'N/A'
+    severity = it.get("severity") or 'INFO'
+    location = it.get("location") or ''
+    message  = it.get("message") or ''
+    vuln     = it.get("vulnerability") or ''
+    risk     = it.get("risk") or risk_text(severity)
+    fix      = it.get("remediation") or recommend_fix(tp, rule_id, message + " " + vuln, location)
+    cwe_list = it.get("cwe") or []
+    refs     = it.get("references") or []
+    help_md  = it.get("help") or ''
+
+    head = f"[{severity}] <b>{escape_xml(rule_id)}</b> — <i>{escape_xml(tp)}</i>"
+    lines = [
+        f"<font color='#{sev_color_hex(severity)}'>{head}</font>",
+        escape_xml(location),
+    ]
+    if message:
+        lines.append(escape_xml(message))
+    if vuln:
+        lines.append(f"<b>Vulnerabilidade:</b> {escape_xml(vuln)}")
+    lines.append(f"<b>Risco:</b> {escape_xml(risk)}")
+    lines.append(f"<b>Correção recomendada:</b> {escape_xml(fix)}")
+    if cwe_list:
+        lines.append(f"<b>CWE:</b> {escape_xml(','.join(cwe_list))}")
+    if refs:
+        lines.append(f"<b>Referências:</b> {escape_xml(', '.join(map(str, refs)))}")
+    elif help_md:
+        # fallback: extrair 1a linha "help"
+        lines.append(escape_xml(help_md.splitlines()[0][:300]))
+
+    html = "<br/>".join(lines)
     return ListItem(Paragraph(html, styles["Body"]), leftIndent=12)
+
 
 def dedup_findings(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen = set()
     out = []
     for it in items:
-        key = (it.get("rule_id",""), it.get("location",""), it.get("message",""))
+        key = (it.get("src",""), it.get("type",""), it.get("rule_id",""), it.get("location",""), it.get("message",""))
         if key not in seen:
             seen.add(key)
             out.append(it)
@@ -390,6 +473,7 @@ def dedup_findings(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # -------------------------------
 # Build PDF
 # -------------------------------
+
 def build_pdf():
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="H1", fontSize=18, leading=22, spaceAfter=12, fontName="Helvetica-Bold"))
@@ -401,9 +485,7 @@ def build_pdf():
 
     flow: List[Any] = []
 
-    # ------------- CAPA (vai usar o template 'cover' na 1ª página) -------------
-    # A primeira página usa 'cover', as próximas usarão 'page'
-    # Conteúdo da capa:
+    # ------------- CAPA (usa template 'cover' na 1ª página) -------------
     if LOGO_PATH and os.path.exists(LOGO_PATH):
         flow.append(Image(LOGO_PATH, width=5*cm, height=5*cm))
         flow.append(Spacer(1, 8))
@@ -423,80 +505,62 @@ def build_pdf():
     flow.append(Paragraph(COMPANY_NAME, styles["H2"]))
     flow.append(PageBreak())  # fim da capa
 
-    # ------------- Resumo executivo + gráficos (template 'page') -------------
-    # Carrega fontes (resultados)
+    # ------------- Carrega fontes (resultados) -------------
     semgrep_js = load_json(SEM_GREP_JSON)
     custom_js  = load_json(CUSTOM_JSON)
-    semgrep_counts = summarize_semgrep(semgrep_js)
-    custom_counts  = summarize_custom(custom_js)
-    semgrep_findings = normalize_semgrep(semgrep_js)
-    custom_findings  = normalize_custom(custom_js)
 
-    tri_img_res, tri_img_counts = ([], {s:0 for s in SEVERITIES})
-    tri_fs_res,  tri_fs_counts  = ([], {s:0 for s in SEVERITIES})
-    tri_cfg_res, tri_cfg_counts = ([], {s:0 for s in SEVERITIES})
+    semgrep_items = normalize_semgrep(semgrep_js)
+    custom_items  = normalize_custom(custom_js)
+
+    tri_img_items, _    = ([], {s:0 for s in SEVERITIES})
+    tri_fs_vuln_items, _   = ([], {s:0 for s in SEVERITIES})
+    tri_fs_secret_items, _ = ([], {s:0 for s in SEVERITIES})
+    tri_cfg_items, _    = ([], {s:0 for s in SEVERITIES})
 
     if os.path.exists(TRIVY_IMG_SARIF):
-        tri_img_res, tri_img_counts = normalize_trivy_image()
-    if os.path.exists(TRIVY_FS_SARIF):
-        tri_fs_res, tri_fs_counts = normalize_trivy_fs()
-    if os.path.exists(TRIVY_CFG_SARIF):
-        tri_cfg_res, tri_cfg_counts = normalize_trivy_cfg()
+        tri_img_items, _ = normalize_trivy_image()
+    if os.path.exists(TRIVY_FS_VULN):
+        tri_fs_vuln_items, _ = normalize_trivy_fs_vuln()
+    if os.path.exists(TRIVY_FS_SECRETS):
+        tri_fs_secret_items, _ = normalize_trivy_fs_secrets()
+    if os.path.exists(TRIVY_CFG_SARIF) or os.path.exists(TRIVY_CFG_DOCKER):
+        tri_cfg_items, _ = normalize_trivy_cfg()
 
-    # Classifica por tipo
-    sast: List[Dict[str,Any]] = []
-    for f in semgrep_findings + custom_findings:
-        if classify_type(f.get("src"), f.get("rule_id"), f.get("message")) == "SAST":
-            f["type"] = "SAST"; sast.append(f)
+    # Agrupa por tipo
+    all_items = []
+    all_items.extend(semgrep_items)
+    all_items.extend(custom_items)
+    all_items.extend(tri_img_items)
+    all_items.extend(tri_fs_vuln_items)
+    all_items.extend(tri_fs_secret_items)
+    all_items.extend(tri_cfg_items)
+    all_items = dedup_findings(all_items)
 
-    sca: List[Dict[str,Any]] = []
-    for f in tri_img_res + tri_fs_res:
-        if classify_type(f.get("src"), f.get("rule_id"), f.get("message")) == "SCA":
-            f["type"] = "SCA"; sca.append(f)
+    by_type: Dict[str, List[Dict[str,Any]]] = {t: [] for t in TYPES}
+    for it in all_items:
+        tp = it.get("type")
+        if tp in by_type:
+            by_type[tp].append(it)
 
-    iac: List[Dict[str,Any]] = []
-    for f in tri_cfg_res:
-        if classify_type(f.get("src"), f.get("rule_id"), f.get("message")) == "IaC":
-            f["type"] = "IaC"; iac.append(f)
-
-    # Dedup
-    sast = dedup_findings(sast)
-    sca  = dedup_findings(sca)
-    iac  = dedup_findings(iac)
-
-    # Contagens por tipo
     counts_by_type: Dict[str, Dict[str,int]] = {}
-    def bump_counts(bucket: str, items: List[Dict]):
-        counts_by_type[bucket] = {s:0 for s in SEVERITIES}
-        for it in items:
-            s = it.get("severity","")
-            if s in counts_by_type[bucket]:
-                counts_by_type[bucket][s] += 1
+    for t, items in by_type.items():
+        counts_by_type[t] = summarize_by_sev(items)
 
-    if sast: bump_counts("SAST", sast)
-    if sca:  bump_counts("SCA", sca)
-    if iac:  bump_counts("IaC", iac)
-
-    # KPIs
-    total_sast = sum(counts_by_type.get("SAST", {}).values())
-    total_sca  = sum(counts_by_type.get("SCA",  {}).values())
-    total_iac  = sum(counts_by_type.get("IaC",  {}).values())
-    total_all  = total_sast + total_sca + total_iac
-    crit_high  = (counts_by_type.get("SAST", {}).get("CRITICAL",0) + counts_by_type.get("SAST", {}).get("HIGH",0) +
-                  counts_by_type.get("SCA",  {}).get("CRITICAL",0) + counts_by_type.get("SCA",  {}).get("HIGH",0) +
-                  counts_by_type.get("IaC",  {}).get("CRITICAL",0) + counts_by_type.get("IaC",  {}).get("HIGH",0))
+    # ------------- Resumo executivo + gráficos -------------
+    total_all = sum(sum(v.values()) for v in counts_by_type.values())
+    crit_high = sum(counts_by_type.get(t,{}).get("CRITICAL",0) + counts_by_type.get(t,{}).get("HIGH",0) for t in TYPES)
 
     flow.append(Paragraph("Resumo executivo", styles["H2"]))
     flow.append(Paragraph(
-        f"Total de achados: <b>{total_all}</b> (SAST={total_sast}, SCA={total_sca}, IaC={total_iac}). "
-        f"CRITICAL+HIGH: <b>{crit_high}</b> (indicadores prioritários de remediação).", styles["Body"]
+        f"Total de achados: <b>{total_all}</b>. "
+        f"CRITICAL+HIGH: <b>{crit_high}</b> (indicadores prioritários de remediação).",
+        styles["Body"]
     ))
     flow.append(Spacer(1, 10))
 
-    # Charts
     overall_chart = os.path.join(CHART_DIR, "overall_by_severity.png")
     bytype_chart  = os.path.join(CHART_DIR, "by_type_severity.png")
-    if counts_by_type:
+    if any(sum(v.values()) for v in counts_by_type.values()):
         chart_overall(counts_by_type, overall_chart)
         chart_by_type(counts_by_type, bytype_chart)
         if os.path.exists(overall_chart):
@@ -509,53 +573,62 @@ def build_pdf():
     flow.append(PageBreak())
 
     # ---------- TOC ----------
-    def make_heading(text: str, level: int, styles=styles) -> Paragraph:
-        style_name = "H1" if level == 1 else "H2"
-        p = Paragraph(text, styles[style_name])
-        p.toc_level = level; p.toc_text = text
-        return p
-
-    flow.append(make_heading("Sumário", 1))
-    flow.append(doc._toc)
+    flow.append(make_heading("Sumário", 1, styles))
+    toc = TableOfContents()
+    toc.levelStyles = [
+        ParagraphStyle(fontName='Helvetica-Bold', fontSize=12, name='TOCHeading1', leftIndent=0, firstLineIndent=0, spaceBefore=4, leading=14),
+        ParagraphStyle(fontName='Helvetica', fontSize=10, name='TOCHeading2', leftIndent=12, firstLineIndent=-12, spaceBefore=2, leading=12),
+    ]
+    flow.append(toc)
     flow.append(PageBreak())
 
     # ---------- Seções ----------
-    def add_type_section(title: str, items: List[Dict]):
+    def add_type_section(title_key: str, title_label: str):
+        items = by_type.get(title_key, [])
         if not items:
             return
-        flow.append(make_heading(title, 1))
+        total = sum(1 for _ in items)
+        flow.append(make_heading(f"{title_label} — {total} achados", 1, styles))
         for sev in SEVERITIES:
-            subset = [f for f in items if f.get("severity")==sev]
+            subset = [f for f in items if (f.get("severity") or "").upper() == sev]
             if not subset:
                 continue
-            flow.append(make_heading(f"{title} — {sev}", 2))
+            flow.append(make_heading(f"{title_label} — {sev}", 2, styles))
             subset.sort(key=lambda x: (x.get("location",""), x.get("rule_id","")))
-            bullets = [bullet_for_finding(styles, title.split(" — ")[0], it.get("rule_id"), it.get("severity"),
-                                          it.get("location"), it.get("message")) for it in subset]
+            bullets = [bullet_for_finding(styles, title_label.split(" — ")[0], it) for it in subset]
             flow.append(ListFlowable(bullets, bulletType="bullet"))
             flow.append(Spacer(1, 8))
         flow.append(PageBreak())
 
-    add_type_section(f"SCA — {sum(counts_by_type.get('SCA',{}).values())} achados", sca)
-    add_type_section(f"SAST — {sum(counts_by_type.get('SAST',{}).values())} achados", sast)
-    if iac:
-        flow.append(make_heading(f"IaC — {sum(counts_by_type.get('IaC',{}).values())} achados", 1))
-        for sev in SEVERITIES:
-            subset = [f for f in iac if f.get("severity")==sev]
-            if not subset:
-                continue
-            flow.append(make_heading(f"IaC — {sev}", 2))
-            subset.sort(key=lambda x: (x.get("location",""), x.get("rule_id","")))
-            bullets = [bullet_for_finding(styles, "IaC", it.get("rule_id"), it.get("severity"),
-                                          it.get("location"), it.get("message")) for it in subset]
-            flow.append(ListFlowable(bullets, bulletType="bullet"))
-            flow.append(Spacer(1, 8))
+    add_type_section("SCA", "SCA")
+    add_type_section("SAST", "SAST")
+    add_type_section("IaC", "IaC")
+    add_type_section("SECRETS", "SECRETS")
+
+    # ---------- Anexos (opcional): metadados de execução ----------
+    flow.append(make_heading("Anexos", 1, styles))
+    meta_lines = [
+        f"Empresa: {escape_xml(COMPANY_NAME)}",
+        f"Relatório: {escape_xml(REPORT_TITLE)}",
+        f"Gerado em: {escape_xml(human_date_utc())}",
+    ]
+    if REPO:
+        meta_lines.extend([
+            f"Repositório: {escape_xml(REPO)}",
+            f"Branch/Ref: {escape_xml(BRANCH)}",
+            f"Commit: {escape_xml(SHA)}",
+            f"Workflow: {escape_xml(WORKFLOW)}",
+            f"Execução: {escape_xml(RUN_URL)}",
+        ])
+    flow.append(Paragraph("<br/>".join(meta_lines), styles["Body"]))
 
     doc.build(flow)
+
 
 def main():
     build_pdf()
     print(f"[report] PDF gerado: {REPORT_PATH}")
+
 
 if __name__ == "__main__":
     main()
