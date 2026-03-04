@@ -2,13 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-Relatório de Segurança (Corporate) — ENHANCED
+Relatório de Segurança (Corporate) — ENHANCED (ajustado)
 - Capa corporativa com logo, empresa, datas e metadados do pipeline.
 - Sumário (TOC), Resumo executivo com gráficos, e seções por tipo: SCA, SAST, IaC, SECRETS.
 - Integra: Semgrep (JSON), Custom Review (JSON enhanced), Trivy Image (SARIF),
   Trivy FS Vulnerabilities (SARIF), Trivy FS Secrets (SARIF), Trivy Config (SARIF),
   e opcionalmente Trivy Config (Dockerfile específico) se presente.
 - Mostra por achado: severidade, localização, mensagem, vulnerabilidade explorável, risco e correção.
+- Ajustes:
+  * Suporte a severidade UNKNOWN (muito comum no Trivy Secrets/IaC).
+  * Extração de severidade mais robusta do SARIF do Trivy (result.properties.severity, etc.).
+  * Renderização dinâmica pelas severidades presentes (evita páginas "vazias").
+  * Função de escape corrigida (evita duplo-escape de HTML/XML).
 """
 
 import json
@@ -48,7 +53,8 @@ TRIVY_CFG_DOCKER  = "trivy-config-dockerfile.sarif"  # IaC (Dockerfile específi
 CHART_DIR = "charts"
 os.makedirs(CHART_DIR, exist_ok=True)
 
-SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+# Inclui UNKNOWN (Trivy pode usar)
+SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "UNKNOWN"]
 
 # Brand via env
 COMPANY_NAME = os.getenv("COMPANY_NAME", "ACME Corp.")
@@ -66,6 +72,7 @@ RUN_URL  = os.getenv("GITHUB_SERVER_URL", "https://github.com").rstrip("/") + f"
 # -------------------------------
 # Utils
 # -------------------------------
+
 def load_json(path: str):
     if not os.path.exists(path):
         return None
@@ -75,8 +82,11 @@ def load_json(path: str):
     except Exception:
         return None
 
+
 def escape_xml(s: str) -> str:
+    # Corrige duplo-escape: substitui caracteres brutos por entidades XML
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 
 def sev_color_hex(level: str) -> str:
     COLORS = {
@@ -85,8 +95,10 @@ def sev_color_hex(level: str) -> str:
         "MEDIUM":   "E6A100",
         "LOW":      "1E90FF",
         "INFO":     "666666",
+        "UNKNOWN":  "A9A9A9",
     }
     return COLORS.get((level or "").upper(), "000000")
+
 
 def human_date_utc() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -95,12 +107,15 @@ def human_date_utc() -> str:
 # Normalization helpers
 # -------------------------------
 
+def _norm_sev(sev: str) -> str:
+    sev = (sev or "").upper()
+    return sev if sev in SEVERITIES else "UNKNOWN"
+
+
 def summarize_by_sev(items: List[Dict[str,Any]]) -> Dict[str,int]:
     counts = {k:0 for k in SEVERITIES}
     for r in items:
-        sev = (r.get("severity") or "").upper()
-        if sev in counts:
-            counts[sev] += 1
+        counts[_norm_sev(r.get("severity"))] += 1
     return counts
 
 # --- Semgrep JSON ---
@@ -108,12 +123,13 @@ def summarize_by_sev(items: List[Dict[str,Any]]) -> Dict[str,int]:
 def summarize_semgrep(js: Dict) -> Dict[str, int]:
     return summarize_by_sev(normalize_semgrep(js))
 
+
 def normalize_semgrep(js: Dict) -> List[Dict[str, Any]]:
     out = []
     if not js:
         return out
     for r in js.get("results", []):
-        sev = (r.get("extra", {}).get("severity") or "").upper()
+        sev = _norm_sev((r.get("extra", {}).get("severity") or ""))
         out.append({
             "src": "Semgrep",
             "type": "SAST",
@@ -135,6 +151,7 @@ def normalize_semgrep(js: Dict) -> List[Dict[str, Any]]:
 def summarize_custom(js: Dict) -> Dict[str, int]:
     return summarize_by_sev(normalize_custom(js))
 
+
 def normalize_custom(js: Dict) -> List[Dict[str, Any]]:
     out = []
     if not js:
@@ -144,7 +161,7 @@ def normalize_custom(js: Dict) -> List[Dict[str, Any]]:
             "src": "Custom",
             "type": "SAST",
             "rule_id": r.get("rule_id", ""),
-            "severity": (r.get("severity") or "").upper(),
+            "severity": _norm_sev(r.get("severity")),
             "location": f"{r.get('file','')}:{r.get('line','')}",
             "message": r.get("message", "") or "",
             "vulnerability": r.get("vulnerability", ""),
@@ -163,6 +180,19 @@ def sarif_runs(path: str) -> List[Dict[str, Any]]:
     if not sarif:
         return []
     return sarif.get("runs", [])
+
+
+def _norm_sarif_sev(res: Dict[str,Any], rule: Dict[str,Any]) -> str:
+    # Preferências: result.properties.problem.severity -> result.properties.severity (Trivy)
+    # -> rule.properties.* -> mapeamento de level
+    props_res = (res.get("properties") or {})
+    sev = (props_res.get("problem.severity") or props_res.get("severity") or "").strip()
+    if not sev and isinstance(rule, dict):
+        props_rule = (rule.get("properties") or {})
+        sev = (props_rule.get("problem.severity") or props_rule.get("security-severity") or props_rule.get("severity") or "").strip()
+    if not sev:
+        sev = {"ERROR":"HIGH", "WARNING":"MEDIUM", "NOTE":"LOW"}.get((res.get("level") or "").upper(), "")
+    return _norm_sev(sev)
 
 
 def sarif_results_with_rules(path: str) -> List[Dict[str, Any]]:
@@ -185,17 +215,10 @@ def sarif_results_with_rules(path: str) -> List[Dict[str, Any]]:
                 start_line = (locs[0].get("physicalLocation", {}).get("region", {}) or {}).get("startLine", "")
                 if start_line:
                     uri = f"{uri}:{start_line}"
-            # Severity: preferir result.properties se existir
-            sev = (res.get("properties", {}) or {}).get("problem.severity", "")
-            if not sev:
-                # fallback para rule.properties ou nível
-                rule = rules_index.get(rid, {})
-                props = rule.get("properties", {}) if isinstance(rule, dict) else {}
-                sev   = (props.get("problem.severity") or props.get("security-severity") or props.get("severity") or "").upper()
-            sev = (sev or "").upper() or {"ERROR":"HIGH","WARNING":"MEDIUM","NOTE":"LOW"}.get((res.get("level") or "").upper(), "LOW")
+            rule = rules_index.get(rid, {})
+            sev  = _norm_sarif_sev(res, rule)
 
             # Extra: tentar capturar help e referências
-            rule = rules_index.get(rid, {})
             help_text = ""
             if isinstance(rule, dict):
                 help_obj = rule.get("help", {})
@@ -252,7 +275,7 @@ def normalize_trivy_cfg() -> Tuple[List[Dict], Dict[str,int]]:
     for r in res:
         r["src"] = "Trivy Config"
         r["type"] = "IaC"
-    # Dockefile específico (opcional)
+    # Dockerfile específico (opcional)
     if os.path.exists(TRIVY_CFG_DOCKER):
         extra = sarif_results_with_rules(TRIVY_CFG_DOCKER)
         for r in extra:
@@ -277,9 +300,10 @@ def risk_text(sev: str) -> str:
         "HIGH":     "Risco alto: exploração provável com impacto significativo em confidencialidade, integridade ou disponibilidade.",
         "MEDIUM":   "Risco médio: exploração depende de condições adicionais; impacto moderado.",
         "LOW":      "Risco baixo: difícil de explorar ou impacto limitado; ainda assim recomenda-se correção.",
-        "INFO":     "Informativo: melhoria recomendada, sem evidência de risco imediato."
+        "INFO":     "Informativo: melhoria recomendada, sem evidência de risco imediato.",
+        "UNKNOWN":  "Gravidade desconhecida: trate como média até classificação; valide impacto/contexto.",
     }
-    return m.get((sev or "").upper(), "Risco não classificado.")
+    return m.get(_norm_sev(sev), "Risco não classificado.")
 
 
 def recommend_fix(tp: str, rule_id: str, message: str, location: str) -> str:
@@ -333,8 +357,8 @@ def chart_overall(counts_by_type: Dict[str, Dict[str,int]], out_path: str):
         for s in SEVERITIES:
             totals[s] += tcounts.get(s, 0)
     fig, ax = plt.subplots(figsize=(6.2, 3.2))
-    bars = ax.bar(SEVERITIES, [totals[s] for s in SEVERITIES],
-                  color=["#8B0000","#DC143C","#FFA500","#1E90FF","#808080"])
+    colors = [sev_color_hex(s) for s in SEVERITIES]
+    bars = ax.bar(SEVERITIES, [totals[s] for s in SEVERITIES], color=colors)
     ax.set_title("Achados por severidade (geral)", fontsize=11)
     ax.set_ylabel("Quantidade")
     for b in bars:
@@ -350,14 +374,13 @@ def chart_by_type(counts_by_type: Dict[str, Dict[str,int]], out_path: str):
     if not types:
         return
     x = range(len(types))
-    width = 0.15
-    fig, ax = plt.subplots(figsize=(6.8, 3.6))
-    colors_map = {"CRITICAL":"#8B0000","HIGH":"#DC143C","MEDIUM":"#FFA500","LOW":"#1E90FF","INFO":"#808080"}
+    width = 0.12
+    fig, ax = plt.subplots(figsize=(7.2, 3.8))
     for i, sev in enumerate(SEVERITIES):
         vals = [counts_by_type[t].get(sev,0) for t in types]
-        ax.bar([xi + i*width for xi in x], vals, width=width, label=sev, color=colors_map[sev])
+        ax.bar([xi + i*width for xi in x], vals, width=width, label=sev, color=sev_color_hex(sev))
     ax.set_title("Achados por tipo e severidade", fontsize=11)
-    ax.set_xticks([xi + 2*width for xi in x])
+    ax.set_xticks([xi + (len(SEVERITIES)//2)*width for xi in x])
     ax.set_xticklabels(types, rotation=0, ha="center")
     ax.legend(fontsize=8, ncol=3)
     ax.set_ylabel("Quantidade")
@@ -403,10 +426,8 @@ class CorporateDoc(BaseDocTemplate):
         self.addPageTemplates([cover_tmpl, page_tmpl])
         self._toc = TableOfContents()
         self._toc.levelStyles = [
-            ParagraphStyle(fontName='Helvetica-Bold', fontSize=12, name='TOCHeading1',
-                           leftIndent=0, firstLineIndent=0, spaceBefore=4, leading=14),
-            ParagraphStyle(fontName='Helvetica', fontSize=10, name='TOCHeading2',
-                           leftIndent=12, firstLineIndent=-12, spaceBefore=2, leading=12),
+            ParagraphStyle(fontName='Helvetica-Bold', fontSize=12, name='TOCHeading1', leftIndent=0, firstLineIndent=0, spaceBefore=4, leading=14),
+            ParagraphStyle(fontName='Helvetica', fontSize=10, name='TOCHeading2', leftIndent=12, firstLineIndent=-12, spaceBefore=2, leading=12),
         ]
 
     def afterFlowable(self, flowable: Flowable):
@@ -427,7 +448,7 @@ def make_heading(text: str, level: int, styles) -> Paragraph:
 
 def bullet_for_finding(styles, tp: str, it: Dict[str,Any]) -> ListItem:
     rule_id  = it.get("rule_id") or 'N/A'
-    severity = it.get("severity") or 'INFO'
+    severity = _norm_sev(it.get("severity"))
     location = it.get("location") or ''
     message  = it.get("message") or ''
     vuln     = it.get("vulnerability") or ''
@@ -453,7 +474,6 @@ def bullet_for_finding(styles, tp: str, it: Dict[str,Any]) -> ListItem:
     if refs:
         lines.append(f"<b>Referências:</b> {escape_xml(', '.join(map(str, refs)))}")
     elif help_md:
-        # fallback: extrair 1a linha "help"
         lines.append(escape_xml(help_md.splitlines()[0][:300]))
 
     html = "<br/>".join(lines)
@@ -485,7 +505,7 @@ def build_pdf():
 
     flow: List[Any] = []
 
-    # ------------- CAPA (usa template 'cover' na 1ª página) -------------
+    # ------------- CAPA -------------
     if LOGO_PATH and os.path.exists(LOGO_PATH):
         flow.append(Image(LOGO_PATH, width=5*cm, height=5*cm))
         flow.append(Spacer(1, 8))
@@ -503,7 +523,7 @@ def build_pdf():
 
     flow.append(Spacer(1, 20))
     flow.append(Paragraph(COMPANY_NAME, styles["H2"]))
-    flow.append(PageBreak())  # fim da capa
+    flow.append(PageBreak())
 
     # ------------- Carrega fontes (resultados) -------------
     semgrep_js = load_json(SEM_GREP_JSON)
@@ -512,10 +532,10 @@ def build_pdf():
     semgrep_items = normalize_semgrep(semgrep_js)
     custom_items  = normalize_custom(custom_js)
 
-    tri_img_items, _    = ([], {s:0 for s in SEVERITIES})
+    tri_img_items, _       = ([], {s:0 for s in SEVERITIES})
     tri_fs_vuln_items, _   = ([], {s:0 for s in SEVERITIES})
     tri_fs_secret_items, _ = ([], {s:0 for s in SEVERITIES})
-    tri_cfg_items, _    = ([], {s:0 for s in SEVERITIES})
+    tri_cfg_items, _       = ([], {s:0 for s in SEVERITIES})
 
     if os.path.exists(TRIVY_IMG_SARIF):
         tri_img_items, _ = normalize_trivy_image()
@@ -587,17 +607,23 @@ def build_pdf():
         items = by_type.get(title_key, [])
         if not items:
             return
-        total = sum(1 for _ in items)
+        total = len(items)
         flow.append(make_heading(f"{title_label} — {total} achados", 1, styles))
-        for sev in SEVERITIES:
-            subset = [f for f in items if (f.get("severity") or "").upper() == sev]
+        # Severidades presentes (inclui UNKNOWN)
+        present = sorted({(it.get('severity') or 'UNKNOWN').upper() for it in items}, key=lambda s: SEVERITIES.index(s) if s in SEVERITIES else 999)
+        rendered = False
+        for sev in present:
+            subset = [f for f in items if _norm_sev(f.get('severity')) == sev]
             if not subset:
                 continue
+            rendered = True
             flow.append(make_heading(f"{title_label} — {sev}", 2, styles))
             subset.sort(key=lambda x: (x.get("location",""), x.get("rule_id","")))
             bullets = [bullet_for_finding(styles, title_label.split(" — ")[0], it) for it in subset]
             flow.append(ListFlowable(bullets, bulletType="bullet"))
             flow.append(Spacer(1, 8))
+        if not rendered:
+            flow.append(Paragraph("Sem itens classificados por severidade (pode estar como UNKNOWN).", styles["Body"]))
         flow.append(PageBreak())
 
     add_type_section("SCA", "SCA")
@@ -605,7 +631,7 @@ def build_pdf():
     add_type_section("IaC", "IaC")
     add_type_section("SECRETS", "SECRETS")
 
-    # ---------- Anexos (opcional): metadados de execução ----------
+    # ---------- Anexos (metadados) ----------
     flow.append(make_heading("Anexos", 1, styles))
     meta_lines = [
         f"Empresa: {escape_xml(COMPANY_NAME)}",
