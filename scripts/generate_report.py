@@ -17,13 +17,13 @@ from reportlab.platypus import (
 from reportlab.platypus.tableofcontents import TableOfContents
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
-# Matplotlib (gráficos)
+# Matplotlib
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # -------------------------------
-# Configurações e entradas
+# Config / Inputs
 # -------------------------------
 REPORT_PATH = "security-report.pdf"
 
@@ -31,20 +31,19 @@ SEM_GREP_JSON   = "semgrep.json"
 CUSTOM_JSON     = "custom-review.json"
 TRIVY_IMG_SARIF = "trivy-image.sarif"
 TRIVY_FS_SARIF  = "trivy-fs.sarif"
-TRIVY_CFG_SARIF = "trivy-config.sarif"  # IaC (Dockerfile/Compose)
+TRIVY_CFG_SARIF = "trivy-config.sarif"  # IaC
 
 CHART_DIR = "charts"
 os.makedirs(CHART_DIR, exist_ok=True)
 
 SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-TYPES_ORDER = ["SCA", "SAST", "IaC"]
 
-# Marca corporativa via env
+# Brand via env
 COMPANY_NAME = os.getenv("COMPANY_NAME", "ACME Corp.")
 REPORT_TITLE = os.getenv("REPORT_TITLE", "Relatório de Segurança — Pipeline CI")
-LOGO_PATH    = os.getenv("LOGO_PATH", "")  # opcional (PNG/JPG/SVG)
+LOGO_PATH    = os.getenv("LOGO_PATH", "")  # optional
 
-# Metadados do pipeline (GitHub Actions)
+# GH metadata
 REPO     = os.getenv("GITHUB_REPOSITORY", "")
 BRANCH   = os.getenv("GITHUB_REF_NAME", os.getenv("GITHUB_REF", ""))
 SHA      = os.getenv("GITHUB_SHA", "")[:8]
@@ -53,7 +52,7 @@ WORKFLOW = os.getenv("GITHUB_WORKFLOW", "")
 RUN_URL  = os.getenv("GITHUB_SERVER_URL", "https://github.com").rstrip("/") + f"/{REPO}/actions/runs/{RUN_ID}" if REPO and RUN_ID else ""
 
 # -------------------------------
-# Utilidades gerais
+# Utils
 # -------------------------------
 def load_json(path: str):
     if not os.path.exists(path):
@@ -65,6 +64,7 @@ def load_json(path: str):
         return None
 
 def escape_xml(s: str) -> str:
+    # Escape ONLY content — do not escape tags we use in Paragraph
     return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
 def sev_color_hex(level: str) -> str:
@@ -81,7 +81,7 @@ def human_date_utc() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
 # -------------------------------
-# Normalização dos achados
+# Normalization
 # -------------------------------
 def summarize_semgrep(js: Dict) -> Dict[str, int]:
     counts = {k: 0 for k in SEVERITIES}
@@ -192,7 +192,7 @@ def normalize_trivy_cfg() -> Tuple[List[Dict], Dict[str,int]]:
     return res, counts
 
 # -------------------------------
-# Classificação por TIPO (SCA/SAST/IaC)
+# Type classification (SCA/SAST/IaC)
 # -------------------------------
 def classify_type(src: str, rule_id: str, message: str) -> str:
     rid = (rule_id or "").upper()
@@ -207,16 +207,13 @@ def classify_type(src: str, rule_id: str, message: str) -> str:
     if s in ("semgrep", "custom"):
         return "SAST"
 
-    if "trivy image" in s:
-        return "SCA"
-
-    if "trivy fs" in s:
+    if "trivy image" in s or "trivy fs" in s:
         return "SCA"
 
     return "SAST"
 
 # -------------------------------
-# Risco & Correção
+# Risk & Fix
 # -------------------------------
 def risk_text(sev: str) -> str:
     m = {
@@ -268,7 +265,7 @@ def recommend_fix(tp: str, rule_id: str, message: str, location: str) -> str:
     return "Aplique correção específica conforme o contexto do achado."
 
 # -------------------------------
-# Gráficos (por severidade e por tipo)
+# Charts
 # -------------------------------
 def chart_overall(counts_by_type: Dict[str, Dict[str,int]], out_path: str):
     totals = {s:0 for s in SEVERITIES}
@@ -308,56 +305,62 @@ def chart_by_type(counts_by_type: Dict[str, Dict[str,int]], out_path: str):
     plt.close(fig)
 
 # -------------------------------
-# Layout (cabeçalho/rodapé e TOC)
+# Layout: capa + páginas internas
 # -------------------------------
 def draw_header_footer(canvas, doc):
     canvas.saveState()
-    # Cabeçalho: empresa + título
+    # Cabeçalho
     header_text = f"{COMPANY_NAME} — {REPORT_TITLE}"
     canvas.setFont("Helvetica", 9)
     canvas.drawString(doc.leftMargin, A4[1] - doc.topMargin + 10, header_text)
-
     # Logo (opcional)
     if LOGO_PATH and os.path.exists(LOGO_PATH):
         try:
-            canvas.drawImage(LOGO_PATH, A4[0] - doc.rightMargin - 2.2*cm, A4[1] - doc.topMargin + 2, width=2*cm, height=2*cm, preserveAspectRatio=True, mask='auto')
+            canvas.drawImage(LOGO_PATH, A4[0] - doc.rightMargin - 2.2*cm, A4[1] - doc.topMargin + 2,
+                             width=2*cm, height=2*cm, preserveAspectRatio=True, mask='auto')
         except Exception:
             pass
-
     # Rodapé: página
     page_text = f"Página {canvas.getPageNumber()}"
     w = stringWidth(page_text, "Helvetica", 9)
     canvas.drawString(A4[0] - doc.rightMargin - w, doc.bottomMargin - 14, page_text)
     canvas.restoreState()
 
-class NumberedDocTemplate(BaseDocTemplate):
+def draw_cover(canvas, doc):
+    # Capa sem header/footer
+    pass
+
+class CorporateDoc(BaseDocTemplate):
     def __init__(self, filename, **kw):
         super().__init__(filename, **kw)
-        frame = Frame(self.leftMargin, self.bottomMargin, self.width, self.height - 0.5*cm, id='normal')
-        template = PageTemplate(id='page', frames=[frame], onPage=draw_header_footer)
-        self.addPageTemplates([template])
+        # Frame padrão
+        frame = Frame(self.leftMargin, self.bottomMargin, self.width, self.height, id='frame')
+        # Templates: capa (sem header) e páginas (com header/footer)
+        cover_tmpl = PageTemplate(id='cover', frames=[frame], onPage=draw_cover)
+        page_tmpl  = PageTemplate(id='page',  frames=[frame], onPage=draw_header_footer)
+        self.addPageTemplates([cover_tmpl, page_tmpl])
+        # TOC
         self._toc = TableOfContents()
         self._toc.levelStyles = [
-            ParagraphStyle(fontName='Helvetica-Bold', fontSize=12, name='TOCHeading1', leftIndent=0, firstLineIndent=-0, spaceBefore=4, leading=14),
-            ParagraphStyle(fontName='Helvetica',      fontSize=10, name='TOCHeading2', leftIndent=12, firstLineIndent=-12, spaceBefore=2, leading=12),
+            ParagraphStyle(fontName='Helvetica-Bold', fontSize=12, name='TOCHeading1',
+                           leftIndent=0, firstLineIndent=0, spaceBefore=4, leading=14),
+            ParagraphStyle(fontName='Helvetica', fontSize=10, name='TOCHeading2',
+                           leftIndent=12, firstLineIndent=-12, spaceBefore=2, leading=12),
         ]
-        self._heading_buffer: List[Tuple[int, str]] = []
 
     def afterFlowable(self, flowable: Flowable):
-        # Registra entradas no sumário se o Paragraph tiver atributos toc_level / toc_text
         if isinstance(flowable, Paragraph) and hasattr(flowable, "toc_level") and hasattr(flowable, "toc_text"):
             self.notify('TOCEntry', (flowable.toc_level, flowable.toc_text, self.page))
 
 def make_heading(text: str, level: int, styles) -> Paragraph:
     style_name = "H1" if level == 1 else "H2"
     p = Paragraph(text, styles[style_name])
-    # Marca para TOC
     p.toc_level = level
     p.toc_text  = text
     return p
 
 # -------------------------------
-# Renderização de achados em tópicos
+# Findings rendering
 # -------------------------------
 def bullet_for_finding(styles, tp: str, rule_id: str, severity: str, location: str, message: str) -> ListItem:
     head = f"[{severity}] <b>{escape_xml(rule_id or 'N/A')}</b> — <i>{escape_xml(tp)}</i>"
@@ -385,34 +388,42 @@ def dedup_findings(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 # -------------------------------
-# Construção do PDF
+# Build PDF
 # -------------------------------
 def build_pdf():
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="H1", fontSize=16, leading=20, spaceAfter=10, fontName="Helvetica-Bold"))
+    styles.add(ParagraphStyle(name="H1", fontSize=18, leading=22, spaceAfter=12, fontName="Helvetica-Bold"))
     styles.add(ParagraphStyle(name="H2", fontSize=13, leading=16, spaceAfter=8, fontName="Helvetica-Bold"))
     styles.add(ParagraphStyle(name="Body", fontSize=10, leading=13))
 
-    doc = NumberedDocTemplate(REPORT_PATH, pagesize=A4,
-                              leftMargin=2*cm, rightMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+    doc = CorporateDoc(REPORT_PATH, pagesize=A4,
+                       leftMargin=2*cm, rightMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
 
     flow: List[Any] = []
 
-    # ---------- CAPA ----------
-    title_p = Paragraph(REPORT_TITLE, styles["H1"])
-    flow.append(title_p)
+    # ------------- CAPA (vai usar o template 'cover' na 1ª página) -------------
+    # A primeira página usa 'cover', as próximas usarão 'page'
+    # Conteúdo da capa:
+    if LOGO_PATH and os.path.exists(LOGO_PATH):
+        flow.append(Image(LOGO_PATH, width=5*cm, height=5*cm))
+        flow.append(Spacer(1, 8))
+    flow.append(Paragraph(REPORT_TITLE, styles["H1"]))
     flow.append(Paragraph(human_date_utc(), styles["Body"]))
-    if REPO:
-        meta_lines = []
-        meta_lines.append(f"Repositório: {escape_xml(REPO)}")
-        if BRANCH: meta_lines.append(f"Branch/Ref: {escape_xml(BRANCH)}")
-        if SHA:    meta_lines.append(f"Commit: {escape_xml(SHA)}")
-        if WORKFLOW: meta_lines.append(f"Workflow: {escape_xml(WORKFLOW)}")
-        if RUN_URL:  meta_lines.append(f"Execução: {escape_xml(RUN_URL)}")
-        flow.append(Paragraph(" — ".join(meta_lines), styles["Body"]))
-    flow.append(Spacer(1, 16))
-    flow.append(Paragraph("Resumo executivo", styles["H2"]))
 
+    if REPO:
+        meta = []
+        meta.append(f"Repositório: {escape_xml(REPO)}")
+        if BRANCH:   meta.append(f"Branch/Ref: {escape_xml(BRANCH)}")
+        if SHA:      meta.append(f"Commit: {escape_xml(SHA)}")
+        if WORKFLOW: meta.append(f"Workflow: {escape_xml(WORKFLOW)}")
+        if RUN_URL:  meta.append(f"Execução: {escape_xml(RUN_URL)}")
+        flow.append(Paragraph(" — ".join(meta), styles["Body"]))
+
+    flow.append(Spacer(1, 20))
+    flow.append(Paragraph(COMPANY_NAME, styles["H2"]))
+    flow.append(PageBreak())  # fim da capa
+
+    # ------------- Resumo executivo + gráficos (template 'page') -------------
     # Carrega fontes (resultados)
     semgrep_js = load_json(SEM_GREP_JSON)
     custom_js  = load_json(CUSTOM_JSON)
@@ -433,25 +444,22 @@ def build_pdf():
         tri_cfg_res, tri_cfg_counts = normalize_trivy_cfg()
 
     # Classifica por tipo
-    sast = []
+    sast: List[Dict[str,Any]] = []
     for f in semgrep_findings + custom_findings:
         if classify_type(f.get("src"), f.get("rule_id"), f.get("message")) == "SAST":
-            f["type"] = "SAST"
-            sast.append(f)
+            f["type"] = "SAST"; sast.append(f)
 
-    sca = []
+    sca: List[Dict[str,Any]] = []
     for f in tri_img_res + tri_fs_res:
         if classify_type(f.get("src"), f.get("rule_id"), f.get("message")) == "SCA":
-            f["type"] = "SCA"
-            sca.append(f)
+            f["type"] = "SCA"; sca.append(f)
 
-    iac = []
+    iac: List[Dict[str,Any]] = []
     for f in tri_cfg_res:
         if classify_type(f.get("src"), f.get("rule_id"), f.get("message")) == "IaC":
-            f["type"] = "IaC"
-            iac.append(f)
+            f["type"] = "IaC"; iac.append(f)
 
-    # Dedup simbólico
+    # Dedup
     sast = dedup_findings(sast)
     sca  = dedup_findings(sca)
     iac  = dedup_findings(iac)
@@ -469,7 +477,7 @@ def build_pdf():
     if sca:  bump_counts("SCA", sca)
     if iac:  bump_counts("IaC", iac)
 
-    # KPIs rápidos
+    # KPIs
     total_sast = sum(counts_by_type.get("SAST", {}).values())
     total_sca  = sum(counts_by_type.get("SCA",  {}).values())
     total_iac  = sum(counts_by_type.get("IaC",  {}).values())
@@ -478,14 +486,14 @@ def build_pdf():
                   counts_by_type.get("SCA",  {}).get("CRITICAL",0) + counts_by_type.get("SCA",  {}).get("HIGH",0) +
                   counts_by_type.get("IaC",  {}).get("CRITICAL",0) + counts_by_type.get("IaC",  {}).get("HIGH",0))
 
-    # Resumo textual
-    resume_parts = []
-    resume_parts.append(f"Total de achados: <b>{total_all}</b> (SAST={total_sast}, SCA={total_sca}, IaC={total_iac}).")
-    resume_parts.append(f"CRITICAL+HIGH: <b>{crit_high}</b> (indicadores prioritários de remediação).")
-    flow.append(Paragraph(" ".join(resume_parts), styles["Body"]))
+    flow.append(Paragraph("Resumo executivo", styles["H2"]))
+    flow.append(Paragraph(
+        f"Total de achados: <b>{total_all}</b> (SAST={total_sast}, SCA={total_sca}, IaC={total_iac}). "
+        f"CRITICAL+HIGH: <b>{crit_high}</b> (indicadores prioritários de remediação).", styles["Body"]
+    ))
     flow.append(Spacer(1, 10))
 
-    # Gráficos
+    # Charts
     overall_chart = os.path.join(CHART_DIR, "overall_by_severity.png")
     bytype_chart  = os.path.join(CHART_DIR, "by_type_severity.png")
     if counts_by_type:
@@ -500,25 +508,27 @@ def build_pdf():
         flow.append(Paragraph("Nenhum achado encontrado nas fontes analisadas.", styles["Body"]))
     flow.append(PageBreak())
 
-    # ---------- SUMÁRIO (TOC) ----------
-    flow.append(make_heading("Sumário", 1, styles))
-    toc = doc._toc
-    toc_d = []
-    # O TableOfContents será preenchido por afterFlowable (notificações)
-    flow.append(toc)
+    # ---------- TOC ----------
+    def make_heading(text: str, level: int, styles=styles) -> Paragraph:
+        style_name = "H1" if level == 1 else "H2"
+        p = Paragraph(text, styles[style_name])
+        p.toc_level = level; p.toc_text = text
+        return p
+
+    flow.append(make_heading("Sumário", 1))
+    flow.append(doc._toc)
     flow.append(PageBreak())
 
-    # ---------- Seções por TIPO ----------
+    # ---------- Seções ----------
     def add_type_section(title: str, items: List[Dict]):
         if not items:
             return
-        flow.append(make_heading(title, 1, styles))
-        # Ordena por severidade (CRITICAL -> INFO) e por local
+        flow.append(make_heading(title, 1))
         for sev in SEVERITIES:
             subset = [f for f in items if f.get("severity")==sev]
             if not subset:
                 continue
-            flow.append(make_heading(f"{title} — {sev}", 2, styles))
+            flow.append(make_heading(f"{title} — {sev}", 2))
             subset.sort(key=lambda x: (x.get("location",""), x.get("rule_id","")))
             bullets = [bullet_for_finding(styles, title.split(" — ")[0], it.get("rule_id"), it.get("severity"),
                                           it.get("location"), it.get("message")) for it in subset]
@@ -528,21 +538,19 @@ def build_pdf():
 
     add_type_section(f"SCA — {sum(counts_by_type.get('SCA',{}).values())} achados", sca)
     add_type_section(f"SAST — {sum(counts_by_type.get('SAST',{}).values())} achados", sast)
-    # Última seção sem PageBreak final
     if iac:
-        flow.append(make_heading(f"IaC — {sum(counts_by_type.get('IaC',{}).values())} achados", 1, styles))
+        flow.append(make_heading(f"IaC — {sum(counts_by_type.get('IaC',{}).values())} achados", 1))
         for sev in SEVERITIES:
             subset = [f for f in iac if f.get("severity")==sev]
             if not subset:
                 continue
-            flow.append(make_heading(f"IaC — {sev}", 2, styles))
+            flow.append(make_heading(f"IaC — {sev}", 2))
             subset.sort(key=lambda x: (x.get("location",""), x.get("rule_id","")))
             bullets = [bullet_for_finding(styles, "IaC", it.get("rule_id"), it.get("severity"),
                                           it.get("location"), it.get("message")) for it in subset]
             flow.append(ListFlowable(bullets, bulletType="bullet"))
             flow.append(Spacer(1, 8))
 
-    # Gera PDF
     doc.build(flow)
 
 def main():
