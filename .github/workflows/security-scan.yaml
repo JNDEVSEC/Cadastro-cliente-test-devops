@@ -161,7 +161,7 @@ jobs:
             custom-review.csv
           if-no-files-found: ignore
 
-      # --- Relatório PDF (inclui Semgrep + Trivy Image/FS + Custom) ---
+      # --- Relatório PDF (tópicos; Semgrep + Trivy Image/FS + Custom) ---
       - name: Generate PDF Security Report (Corporate)
         run: python ./scripts/generate_report.py
 
