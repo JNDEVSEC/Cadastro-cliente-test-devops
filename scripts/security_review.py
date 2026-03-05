@@ -88,13 +88,13 @@ RULES = [
     {"id": "SRV-052", "name": "verificação de TLS desativada",
      "re": r"(verify\s*=\s*False|ssl\.verify\s*=\s*False)", "sev": "HIGH"},
 
-    # XSS (observação: precisa detectar <script> puro, não &lt;script&gt;)
+    # XSS (corrigido: detectar <script> e também &lt;script&gt;)
     {"id": "SRV-060", "name": "XSS (sink perigoso em HTML/JS)",
-     "re": r"(document\.write|innerHTML\s*=|<script>|onerror\s*=|onload\s*=|dangerouslySetInnerHTML)", "sev": "HIGH"},
+     "re": r"(document\.write|innerHTML\s*=|<script>|&lt;script&gt;|onerror\s*=|onload\s*=|dangerouslySetInnerHTML)", "sev": "HIGH"},
 
     # Qualidade/Práticas
     {"id": "SRV-070", "name": "tratamento genérico de exceção",
-     "re": r"(except\s+Exception\b|catch\s*\(Exception\b)", "sev": "LOW"},
+    "re": r"(except\s+Exception\b|catch\s*\(Exception\b)", "sev": "LOW"},
     {"id": "SRV-071", "name": "debug/log verboso em produção",
      "re": r"(debug\s*=\s*True|console\.log|print\s*\()", "sev": "LOW"},
     {"id": "SRV-072", "name": "segredo/senha em comentários",
@@ -272,7 +272,7 @@ RULE_META: Dict[str, Dict] = {
     },
     "SRV-070": {
         "vulnerability": "Captura genérica de exceções.",
-        "risk": "Oculta trilhas e evidencia; dificulta auditoria (repudiation).",
+        "risk": "Oculta trilhas e evidências; dificulta auditoria (repudiation).",
         "remediation": "Capturar tipos específicos; falhar de forma segura; logging adequado.",
         "cwe": ["CWE-703"],
         "references": ["https://cwe.mitre.org/data/definitions/703.html"],
@@ -471,7 +471,6 @@ def to_sarif(findings: List[Dict]) -> Dict:
     for f in findings:
         rid = f["rule_id"]
         if rid not in rules_map:
-            # preferir metadados do RULE_META; fallback no próprio finding
             meta = RULE_META.get(rid, {})
             rules_map[rid] = {
                 "id": rid,
@@ -552,24 +551,31 @@ def main():
     with open(args.sarif_out, "w", encoding="utf-8") as fsr:
         json.dump(to_sarif(all_findings), fsr, ensure_ascii=False, indent=2)
 
-    # (Opcional) CSV
+    # (Opcional) CSV enriquecido
     if args.csv_out:
         import csv
         with open(args.csv_out, "w", encoding="utf-8", newline="") as fc:
             writer = csv.writer(fc)
             writer.writerow([
-                "rule_id", "severity", "file", "line",
-                "message", "snippet", "risk"
+                "rule_id","title","severity","file","line",
+                "message","snippet",
+                "vulnerability","risk","remediation","cwe","references","stride"
             ])
             for f in all_findings:
                 writer.writerow([
-                    f.get("rule_id", ""),
-                    f.get("severity", ""),
-                    f.get("file", ""),
-                    f.get("line", ""),
-                    f.get("message", ""),
-                    str(f.get("snippet", "")).replace("\n", "\\n")[:300],
-                    f.get("risk", "")
+                    f.get("rule_id",""),
+                    f.get("title",""),
+                    f.get("severity",""),
+                    f.get("file",""),
+                    f.get("line",""),
+                    f.get("message",""),
+                    str(f.get("snippet","")).replace("\n","\\n")[:300],
+                    f.get("vulnerability",""),
+                    f.get("risk",""),
+                    f.get("remediation",""),
+                    ",".join(f.get("cwe",[])),
+                    ",".join(map(str, f.get("references",[]))),
+                    ",".join(f.get("stride",[])),
                 ])
 
     counts = summarize(all_findings)
