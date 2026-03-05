@@ -39,7 +39,17 @@ LINE_H  = 12.0
 
 SEV_ORDER = ["CRITICAL","HIGH","MEDIUM","LOW","INFO","UNKNOWN"]
 
-# Paleta de cores
+# STRIDE (ordem canônica para gráficos)
+STRIDE_ORDER = [
+    "Spoofing",
+    "Tampering",
+    "Repudiation",
+    "Information Disclosure",
+    "Denial of Service",
+    "Elevation of Privilege",
+]
+
+# Paleta de cores (severidades)
 SEV_COLORS = {
     "CRITICAL": colors.Color(0.85, 0.10, 0.10, alpha=1),
     "HIGH":     colors.HexColor("#ea580c"),
@@ -112,6 +122,26 @@ def count_by_severity(items, key="severity"):
         counts[sev] += 1
     return counts
 
+def count_by_stride(items, key="stride"):
+    """
+    Soma multi-valor: um achado pode mapear para várias categorias STRIDE.
+    """
+    counts = {s: 0 for s in STRIDE_ORDER}
+    for it in items:
+        strides = it.get(key) or []
+        if isinstance(strides, str):
+            strides = [strides]
+        for s in strides:
+            s_norm = str(s).strip()
+            if s_norm in counts:
+                counts[s_norm] += 1
+    return counts
+
+def _join_non_empty(items, sep=", "):
+    items = items or []
+    items = [str(i).strip() for i in items if str(i).strip()]
+    return sep.join(items)
+
 # =========================================================
 # CARREGAMENTO DE DADOS
 # =========================================================
@@ -147,9 +177,9 @@ def load_semgrep_rich():
 # -------- TRIVY: suporte a JSON (opcional legacy) e SARIF --------
 SARIF_SEV_FROM_LEVEL = {"error": "HIGH", "warning": "MEDIUM", "note": "LOW"}
 
-TRIVY_SARIF_FILES_VULN = ["trivy-image.sarif","trivy-fs-vuln.sarif"]
-TRIVY_SARIF_FILES_SECRETS = ["trivy-fs-secrets.sarif"]
-TRIVY_SARIF_FILES_CONFIG  = ["trivy-config.sarif","trivy-config-dockerfile.sarif"]
+TRIVY_SARIF_FILES_VULN   = ["trivy-image.sarif","trivy-fs-vuln.sarif"]
+TRIVY_SARIF_FILES_SECRETS= ["trivy-fs-secrets.sarif"]
+TRIVY_SARIF_FILES_CONFIG = ["trivy-config.sarif","trivy-config-dockerfile.sarif"]
 
 def _norm_severity(value, fallback="UNKNOWN"):
     if not value:
@@ -270,6 +300,13 @@ def load_custom_review():
             "line":    r.get("line") or 1,
             "message": r.get("message") or "",
             "snippet": r.get("snippet") or "",
+            # >>> novos campos enriquecidos (do security_review.py)
+            "vulnerability": r.get("vulnerability") or "",
+            "risk":          r.get("risk") or "",
+            "remediation":   r.get("remediation") or "",
+            "cwe":           r.get("cwe") or [],
+            "references":    r.get("references") or [],
+            "stride":        r.get("stride") or [],
         })
     return out
 
@@ -393,13 +430,9 @@ def draw_grouped_bars_by_type(c, counts_by_type, title, x, y, width=400, height=
     Gráfico agrupado com categorias = Tipos (SAST,SCA,SECRETS,CONFIG,CUSTOM)
     e séries = severidades (CRITICAL..INFO). Cores por severidade.
     """
-    # ordem dos tipos no eixo X
     types = ["SAST", "SCA", "SECRETS", "CONFIG", "CUSTOM"]
-    # severidades a plotar (ignoramos UNKNOWN para evitar poluição visual;
-    # se quiser incluir UNKNOWN, adicione aqui e no colors)
     sevs = ["CRITICAL","HIGH","MEDIUM","LOW","INFO"]
 
-    # prepara dados
     data = []
     ymax = 0
     for sev in sevs:
@@ -408,7 +441,6 @@ def draw_grouped_bars_by_type(c, counts_by_type, title, x, y, width=400, height=
         ymax = max(ymax, max(row) if row else 0)
     if ymax < 5: ymax = 5
 
-    # desenha com VerticalBarChart (múltiplas séries)
     d = Drawing(width, height)
     d.add(String(width/2.0, height-10, title, fontName="Helvetica-Bold", fontSize=14, textAnchor="middle"))
 
@@ -423,15 +455,12 @@ def draw_grouped_bars_by_type(c, counts_by_type, title, x, y, width=400, height=
     chart.valueAxis.valueMax = ymax
     chart.valueAxis.labelTextFormat = '%d'
 
-    # cores por série (uma série por severidade)
     try:
-        # Nas versões recentes, chart.bars[i].fillColor colore a série i
         for i, sev in enumerate(sevs):
             chart.bars[i].fillColor = SEV_COLORS.get(sev, colors.lightgrey)
     except Exception:
         pass
 
-    # rótulos nos topos das barras (apenas se >0)
     chart.barLabelFormat = '%0.0f'
     chart.barLabels.nudge = 4
     chart.barLabels.fontName = "Helvetica"
@@ -439,7 +468,6 @@ def draw_grouped_bars_by_type(c, counts_by_type, title, x, y, width=400, height=
 
     d.add(chart)
 
-    # legenda
     leg = Legend()
     leg.fontName = "Helvetica"; leg.fontSize = 9
     leg.alignment = 'right'
@@ -448,6 +476,52 @@ def draw_grouped_bars_by_type(c, counts_by_type, title, x, y, width=400, height=
     d.add(leg)
 
     renderPDF.draw(d, c, x, y)
+
+def draw_stride_bars_custom(c, stride_counts, title, origin_x, origin_y, width=400, height=240):
+    """
+    Barras simples por STRIDE (Custom).
+    """
+    c.setFont("Helvetica-Bold", FONT_L); c.setFillColor(colors.black)
+    c.drawString(origin_x, origin_y + height - 10, title)
+
+    d = Drawing(width, height - 20)
+    bar = VerticalBarChart()
+    bar.x, bar.y = 36, 32
+    bar.width, bar.height = width - 80, height - 80
+
+    labels = STRIDE_ORDER
+    data = [int(stride_counts.get(s, 0) or 0) for s in labels]
+
+    bar.data = [data]
+    bar.categoryAxis.categoryNames = labels
+    bar.groupSpacing = 6
+    bar.barSpacing = 1.5
+    bar.barWidth = 12
+    bar.valueAxis.valueMin = 0
+    bar.valueAxis.labelTextFormat = '%d'
+
+    # paleta simples para STRIDE (tons de laranja/acinzentado)
+    stride_colors = [
+        colors.HexColor("#fb923c"),  # Spoofing
+        colors.HexColor("#f97316"),  # Tampering
+        colors.HexColor("#fdba74"),  # Repudiation
+        colors.HexColor("#6b7280"),  # Info Disc.
+        colors.HexColor("#9ca3af"),  # DoS
+        colors.HexColor("#ea580c"),  # EoP
+    ]
+    try:
+        for i in range(len(labels)):
+            bar.bars[i].fillColor = stride_colors[i % len(stride_colors)]
+    except Exception:
+        pass
+
+    bar.barLabelFormat = '%0.0f'
+    bar.barLabels.nudge = 5
+    bar.barLabels.fontName = "Helvetica"
+    bar.barLabels.fontSize = FONT_S
+
+    d.add(bar)
+    renderPDF.draw(d, c, origin_x, origin_y)
 
 # =========================================================
 # RISCO & CVSS
@@ -500,7 +574,7 @@ def draw_semgrep_topics(c, semgrep):
         sugestao = f"Sugestão: {fix}" if fix else "Sugestão: aplicar mitigação recomendada pela regra."
         refs    = r.get("references") or []
         ref_line = f"Referências: {', '.join(refs[:2])}" if refs else None
-        lines = [arquivo, risco, sugestao];  
+        lines = [arquivo, risco, sugestao]
         if ref_line: lines.append(ref_line)
         y = draw_topic(c, y, heading, lines, color=SEV_COLORS.get(sev, colors.grey))
     draw_footer(c); c.showPage()
@@ -535,7 +609,7 @@ def draw_secrets_topics(c, secrets):
         fileline = f"Arquivo: {f.get('file','')}:{f.get('line',1)}".strip(":")
         msg = f.get("message") or "(sem detalhes)"
         source = f"Fonte: {f.get('source')}" if f.get("source") else None
-        lines = [fileline, f"Mensagem: {msg}"]; 
+        lines = [fileline, f"Mensagem: {msg}"]
         if source: lines.append(source)
         y = draw_topic(c, y, head, lines, color=SEV_COLORS.get(sev, colors.grey))
     draw_footer(c); c.showPage()
@@ -549,7 +623,7 @@ def draw_config_topics(c, cfg):
         fileline = f"Arquivo: {f.get('file','')}:{f.get('line',1)}".strip(":")
         msg = f.get("message") or "(sem detalhes)"
         source = f"Fonte: {f.get('source')}" if f.get("source") else None
-        lines = [fileline, f"Mensagem: {msg}"]; 
+        lines = [fileline, f"Mensagem: {msg}"]
         if source: lines.append(source)
         y = draw_topic(c, y, head, lines, color=SEV_COLORS.get(sev, colors.grey))
     draw_footer(c); c.showPage()
@@ -557,14 +631,33 @@ def draw_config_topics(c, cfg):
 def draw_custom_topics(c, findings):
     y = PAGE_H - MARGIN_T
     y = draw_section_title(c, "Achados – Custom Security Review", y)
+
     for f in findings:
         sev   = (f.get("severity") or "UNKNOWN").upper()
         head  = f"[{sev}] {f.get('rule_id','')}" + (f" — {f.get('title')}" if f.get("title") else "")
         fileline = f"Arquivo: {f.get('file','')}:{f.get('line',1)}".strip(":")
-        msg  = f.get("message") or None
-        snip = f.get("snippet") or None
-        lines = [ln for ln in [fileline, f"Mensagem: {msg}" if msg else None, f"Snippet: {snip[:180]}" if snip else None] if ln]
+
+        msg   = f.get("message") or None
+        vuln  = f.get("vulnerability") or None
+        risk  = f.get("risk") or None
+        fix   = f.get("remediation") or None
+        cwe   = _join_non_empty(f.get("cwe"))
+        refs  = _join_non_empty(f.get("references"))
+        stride = _join_non_empty(f.get("stride"))
+        snip  = f.get("snippet") or None
+
+        lines = [fileline]
+        if msg:    lines.append(f"Mensagem: {msg}")
+        if vuln:   lines.append(f"Vulnerabilidade: {vuln}")
+        if risk:   lines.append(f"Risco: {risk}")
+        if fix:    lines.append(f"Correção: {fix}")
+        if cwe:    lines.append(f"CWE: {cwe}")
+        if refs:   lines.append(f"Referências: {refs}")
+        if stride: lines.append(f"Modelo de Ameaça (STRIDE): {stride}")
+        if snip:   lines.append(f"Snippet: {snip[:180]}")
+
         y = draw_topic(c, y, head, lines, color=SEV_COLORS.get(sev, colors.grey))
+
     draw_footer(c); c.showPage()
 
 # =========================================================
@@ -794,9 +887,21 @@ def main():
         draw_footer(c); c.showPage(); y = PAGE_H - MARGIN_T
         y = draw_section_title(c, "Distribuição por severidade (continuação)", y); y -= 14
 
-    # Custom
+    # Custom (por severidade)
     draw_bars_with_values_single(
-        c, custom_counts, "Custom Security Review",
+        c, custom_counts, "Custom Security Review – por Severidade",
+        MARGIN_L, y - 240, width=PAGE_W - MARGIN_L - MARGIN_R, height=240
+    )
+    y = y - 260
+
+    # Custom (por STRIDE)
+    stride_counts_custom = count_by_stride(custom)
+    if y < (MARGIN_B + 260):
+        draw_footer(c); c.showPage(); y = PAGE_H - MARGIN_T
+        y = draw_section_title(c, "Distribuição (continuação)", y); y -= 14
+
+    draw_stride_bars_custom(
+        c, stride_counts_custom, "Custom Security Review – Modelo de Ameaça (STRIDE)",
         MARGIN_L, y - 240, width=PAGE_W - MARGIN_L - MARGIN_R, height=240
     )
     draw_footer(c); c.showPage()
