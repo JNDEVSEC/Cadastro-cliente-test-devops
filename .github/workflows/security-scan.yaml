@@ -7,7 +7,6 @@ on:
         required: false
         default: '.'
         type: string
-
 permissions:
   contents: read
   security-events: write
