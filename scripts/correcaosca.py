@@ -1,41 +1,61 @@
+import json
+import argparse
+import sys
 
-def montar_prompt(nome_produto: str, versao_atual: str, cve: str) -> str:
-    """
-    Cria um prompt que solicita exclusivamente a versão que corrige a vulnerabilidade.
-    """
-    prompt = f"""
-Informe somente a versão que corrige a vulnerabilidade abaixo.
+SEVERITY_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
-Produto: {nome_produto}
-Versão atual: {versao_atual}
-CVE: {cve}
+def severity_ge(a, b):
+    return SEVERITY_ORDER.index(a) >= SEVERITY_ORDER.index(b)
 
-Resposta esperada:
-(apenas a versão corrigida, sem explicações)
-"""
-    return prompt
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--trivy", required=True, help="trivy-results.json")
+    parser.add_argument("--fail-on", default="CRITICAL" or "HIGHT",
+                        choices=SEVERITY_ORDER)
+    args = parser.parse_args()
 
+    with open(args.trivy, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-def consultar_modelo(prompt: str) -> str:
-    """
-    Função placeholder onde você integra o modelo de IA.
-    Substitua a implementação pelo chamado real (OpenAI, Azure OpenAI, etc.).
-    """
-    # EXEMPLO DE RESPOSTA SIMULADA
-    respostas_mock = {
-        "sirv|CVE-2024-10855": "7.3.1"
-    }
+    failures = []
 
-    chave = "sirv|CVE-2024-10855"
-    return respostas_mock.get(chave, "versão não encontrada")
+    for result in data.get("Results", []):
+        target = result.get("Target")
+        vulnerabilities = result.get("Vulnerabilities", [])
 
+        for v in vulnerabilities:
+            cve = v.get("VulnerabilityID")
+            pkg = v.get("PkgName")
+            installed = v.get("InstalledVersion")
+            fixed = v.get("FixedVersion")
+            severity = v.get("Severity")
+
+            if not severity_ge(severity, args.fail_on):
+                continue
+
+            if fixed and fixed != installed:
+                failures.append({
+                    "target": target,
+                    "package": pkg,
+                    "installed": installed,
+                    "fixed": fixed,
+                    "cve": cve,
+                    "severity": severity
+                })
+
+    if failures:
+        print("\n❌ Vulnerabilidades com correção disponível encontradas:\n")
+
+        for f in failures:
+            print(
+                f"- [{f['severity']}] {f['cve']} | "
+                f"{f['package']} {f['installed']} → {f['fixed']} "
+                f"({f['target']})"
+            )
+
+        sys.exit(1)
+
+    print("✅ Nenhuma vulnerabilidade crítica com correção pendente encontrada.")
 
 if __name__ == "__main__":
-    nome_produto = input("Nome do produto: ").strip()
-    versao_atual = input("Versão atual: ").strip()
-    cve = input("CVE: ").strip()
-
-    prompt = montar_prompt(nome_produto, versao_atual, cve)
-    resposta = consultar_modelo(prompt)
-
-    print(resposta)
+    main()
