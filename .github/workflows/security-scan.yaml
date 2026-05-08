@@ -247,6 +247,14 @@ jobs:
           category: iac-trivy-config-dockerfile
         continue-on-error: true
 
+        
+      - name: Validate CVE fixed versions
+        run: |
+          python  .security-templates/scripts/validate_cve_fixes.py \
+            --trivy trivy-results.json \
+            --fail-on HIGH
+
+
       # =========================
       # CUSTOM SECURITY REVIEW (exclui scripts/)
       # =========================
