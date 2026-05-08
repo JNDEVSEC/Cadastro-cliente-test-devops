@@ -83,7 +83,7 @@ jobs:
       # =========================
       # TRIVY — FILESYSTEM
       # =========================
-      - name: Run Trivy (filesystem: vuln + secrets + misconfig)
+      - name: "Run Trivy (filesystem: vuln + secrets + misconfig)"
         uses: aquasecurity/trivy-action@v0.33.1
         with:
           scan-type: fs
