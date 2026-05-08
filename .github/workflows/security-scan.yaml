@@ -1,13 +1,12 @@
 name: Security Scan
 
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
-  schedule:
-    - cron: '16 14 * * 2'  # terças 14:16 UTC
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      project-path:
+        required: false
+        default: '.'
+        type: string
 
 permissions:
   contents: read
@@ -15,11 +14,14 @@ permissions:
 
 jobs:
   scan:
-    name: Security Scan (Semgrep + Trivy + Custom)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.project-path }}
+        shell: bash
 
     steps:
-      - name: Checkout code
+      - name: Checkout caller repository
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -27,24 +29,26 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install system dependencies
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
 
-      - name: Install Python dependencies
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install semgrep reportlab PyPDF2 matplotlib
+          pip install reportlab PyPDF2 semgrep
 
-      # --- SEMGREP (exclui scripts/) ---
-      - name: Run Semgrep (JSON)
-        run: semgrep scan --config auto --exclude scripts --json --output semgrep.json || true
+      # =========================
+      # SEMGREP
+      # =========================
+      - name: Run Semgrep JSON
+        run: semgrep scan --config auto --json --output semgrep.json || true
 
-      - name: Run Semgrep (SARIF)
-        run: semgrep scan --config auto --exclude scripts --sarif --output semgrep.sarif || true
+      - name: Run Semgrep SARIF
+        run: semgrep scan --config auto --sarif --output semgrep.sarif || true
 
-      - name: Convert Semgrep JSON to CSV
+      - name: Convert JSON to CSV
         run: |
           jq -r '
             ["Rule ID","Severity","File","Line","Message"],
@@ -57,7 +61,7 @@ jobs:
             ]) | @csv
           ' semgrep.json > semgrep.csv
 
-      - name: Build flat JSON (semgrep.report.json)
+      - name: Build flat JSON
         run: |
           jq '{
             results: [
@@ -72,67 +76,46 @@ jobs:
           }' semgrep.json > semgrep.report.json
 
       - name: Upload Semgrep SARIF
-        if: ${{ hashFiles('semgrep.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: semgrep.sarif
-          category: sast-semgrep
 
-      # --- TRIVY: Detecta Dockerfile e faz build (best-effort) ---
-      - name: Detect Dockerfile path
-        id: dfile
-        shell: bash
-        run: |
-          FILE=$(git ls-files | grep -E '(^|/)[Dd]ockerfile([.-].*)?$' | head -n 1 || true)
-          if [ -n "$FILE" ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-            echo "path=$FILE" >> "$GITHUB_OUTPUT"
-            echo "Found Dockerfile at: $FILE"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "path=" >> "$GITHUB_OUTPUT"
-            echo "No Dockerfile found"
-          fi
-
-      - name: Trivy version/debug
-        run: |
-          trivy --version || true
-          docker version || true
-
-      - name: Build Docker image (best-effort)
-        if: ${{ steps.dfile.outputs.found == 'true' }}
-        id: buildimg
-        shell: bash
-        continue-on-error: true
-        run: |
-          if docker build -f "${{ steps.dfile.outputs.path }}" -t local/test-insecure:${{ github.sha }} .; then
-            echo "succeeded=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Build falhou, continuando pipeline (scan de imagem será pulado)."
-            echo "succeeded=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # --- TRIVY: Image (só se o build suceder) ---
-      - name: Trivy Image scan (SARIF - CVEs)
-        if: ${{ steps.dfile.outputs.found == 'true' && steps.buildimg.outputs.succeeded == 'true' }}
-        uses: aquasecurity/trivy-action@0.33.1
+      # =========================
+      # TRIVY - FILESYSTEM
+      # =========================
+      - name: Run Trivy (filesystem: vuln + secrets + misconfig)
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
-          image-ref: local/test-insecure:${{ github.sha }}
-          scanners: 'vuln'
-          vuln-type: 'os,library'
-          format: 'sarif'
-          output: 'trivy-image.sarif'
-          severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'
-          ignore-unfixed: true
-          exit-code: '0'
-        continue-on-error: true
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: trivy-results.json
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+        env:
+          TRIVY_SCANNERS: vuln,secret,misconfig
 
-      - name: Trivy Image (table debug)
-        if: ${{ steps.dfile.outputs.found == 'true' && steps.buildimg.outputs.succeeded == 'true' }}
-        run: trivy image --scanners vuln --vuln-type os,library -f table local/test-insecure:${{ github.sha }} || true
+      # =========================
+      # DOCKER BUILD + TRIVY IMAGE
+      # =========================
+      - name: Build Docker image (if Dockerfile exists)
+        run: |
+          if [ -f Dockerfile ]; then
+            docker build -t local/test-insecure:${{ github.sha }} .
+          else
+            echo "No Dockerfile found, skipping image build."
+          fi
 
-      - name: Upload Trivy Image SARIF (artifact)
-        if: ${{ hashFiles('trivy-image.sarif') != '' }}
+      - name: Trivy Image (if image exists)
+        run: |
+          if docker image inspect local/test-insecure:${{ github.sha }} >/dev/null 2>&1; then
+            trivy image --format sarif --output trivy-image.sarif \
+              --severity CRITICAL,HIGH,MEDIUM,LOW \
+              local/test-insecure:${{ github.sha }}
+          else
+            echo "Image not found. Skipping image scan."
+          fi
+
+      - name: Upload Trivy Image SARIF
         uses: actions/upload-artifact@v4
         with:
           name: trivy-image-sarif
@@ -140,154 +123,50 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Trivy Image SARIF to Code Scanning
-        if: ${{ hashFiles('trivy-image.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-image.sarif
-          category: sca-trivy-image
         continue-on-error: true
-
-      # --- TRIVY: FS (ignora scripts/ via .trivyignore) ---
-      - name: Create .trivyignore (ignore scripts/)
-        run: |
-          echo "scripts/" >> .trivyignore
-
-      # FS 1/2 — Vulnerabilities (CVEs)
-      - name: Trivy FS scan (SARIF - CVEs)
-        uses: aquasecurity/trivy-action@0.33.1
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          scanners: 'vuln'
-          vuln-type: 'os,library'
-          format: 'sarif'
-          output: 'trivy-fs-vuln.sarif'
-          severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'
-          ignore-unfixed: true
-          exit-code: '0'
-        continue-on-error: true
-
-      - name: Upload Trivy FS CVEs SARIF
-        if: ${{ hashFiles('trivy-fs-vuln.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-fs-vuln.sarif
-          category: sca-trivy-fs-vuln
-        continue-on-error: true
-
-      # FS 2/2 — Secrets
-      - name: Trivy FS scan (SARIF - Secrets)
-        uses: aquasecurity/trivy-action@0.33.1
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          scanners: 'secret'
-          format: 'sarif'
-          output: 'trivy-fs-secrets.sarif'
-          exit-code: '0'
-        continue-on-error: true
-
-      - name: Trivy FS (table debug - Secrets)
-        run: trivy fs --scanners secret -f table . || true
-
-      - name: Upload Trivy FS Secrets SARIF
-        if: ${{ hashFiles('trivy-fs-secrets.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-fs-secrets.sarif
-          category: secrets-trivy-fs
-        continue-on-error: true
-
-      # --- TRIVY: Config (IaC) — somente misconfig/IaC ---
-      - name: Trivy Config scan (Dockerfile/IaC -> SARIF)
-        uses: aquasecurity/trivy-action@0.33.1
-        with:
-          scan-type: 'config'
-          scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-config.sarif'
-          ignore-unfixed: true
-          exit-code: '0'
-        continue-on-error: true
-
-      - name: Trivy Config (table debug)
-        run: trivy config -f table . || true
-
-      - name: Upload Trivy Config SARIF
-        if: ${{ hashFiles('trivy-config.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-config.sarif
-          category: iac-trivy-config
-        continue-on-error: true
-
-      # --- EXTRA: Scans específicos no Dockerfile detectado ---
-      - name: Trivy Config+Secret (Dockerfile específico -> SARIF)
-        if: ${{ steps.dfile.outputs.found == 'true' }}
-        uses: aquasecurity/trivy-action@0.33.1
-        with:
-          scan-type: 'config'
-          scan-ref: '${{ steps.dfile.outputs.path }}'
-          
-          format: 'sarif'
-          output: 'trivy-config-dockerfile.sarif'
-          exit-code: '0'
-        continue-on-error: true
-
-      - name: Trivy Config+Secret (Dockerfile específico - table debug)
-        if: ${{ steps.dfile.outputs.found == 'true' }}
-        run: |
-          trivy config --scanners config,secret -f table "${{ steps.dfile.outputs.path }}" || true
-
-      - name: Upload Trivy Config Dockerfile SARIF
-        if: ${{ hashFiles('trivy-config-dockerfile.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-config-dockerfile.sarif
-          category: iac-trivy-config-dockerfile
-        continue-on-error: true
-
-        
-      - name: Validate CVE fixed versions
-        run: |
-          python  .security-templates/scripts/validate_cve_fixes.py \
-            --trivy trivy-results.json \
-            --fail-on HIGH
-
 
       # =========================
-      # CUSTOM SECURITY REVIEW (exclui scripts/)
+      # CUSTOM SECURITY REVIEW
       # =========================
+      - name: Checkout security templates (tools)
+        uses: actions/checkout@v4
+        with:
+          repository: JNDEVSEC/security-templates
+          ref: v1
+          path: .security-templates
+
       - name: Run custom security review (FS)
         run: |
-          python ./scripts/security_review.py \
+          python .security-templates/scripts/security_review.py \
             --root . \
             --json-out custom-review.json \
             --sarif-out custom-review.sarif \
-            --csv-out custom-review.csv \
-            --exclude-dirs ".git,.hg,.svn,.tox,.mypy_cache,.pytest_cache,node_modules,dist,build,out,.venv,venv,__pycache__,.next,.nuxt,.yarn,.pnpm-store,coverage,scripts"
+            --fail-on HIGH
 
       - name: Upload Custom Review SARIF
-        if: ${{ hashFiles('custom-review.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: custom-review.sarif
-          category: sast-custom
 
-      - name: Upload Custom Review JSON/CSV
+      - name: Upload Custom Review JSON
         uses: actions/upload-artifact@v4
         with:
           name: custom-review
-          path: |
-            custom-review.json
-            custom-review.csv
-          if-no-files-found: ignore
+          path: custom-review.json
 
-      # --- Relatório PDF (corporate) ---
-      - name: Generate PDF Security Report (Corporate)
-        run: python ./scripts/generate_report.py
+      # =========================
+      # PDF REPORT
+      # =========================
+      - name: Generate PDF Report
+        run: python scripts/generate_report.py
 
-      - name: Upload all reports
+      # =========================
+      # ARTEFATOS
+      # =========================
+      - name: Upload reports
         uses: actions/upload-artifact@v4
         with:
           name: security-reports
@@ -296,13 +175,8 @@ jobs:
             semgrep.csv
             semgrep.report.json
             semgrep.sarif
+            trivy-results.json
             trivy-image.sarif
-            trivy-fs-vuln.sarif
-            trivy-fs-secrets.sarif
-            trivy-config.sarif
-            trivy-config-dockerfile.sarif
             custom-review.json
             custom-review.sarif
-            custom-review.csv
             security-report.pdf
-          if-no-files-found: ignore
