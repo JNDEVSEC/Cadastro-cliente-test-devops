@@ -115,7 +115,7 @@ jobs:
       # --- TRIVY: Image (só se o build suceder) ---
       - name: Trivy Image scan (SARIF - CVEs)
         if: ${{ steps.dfile.outputs.found == 'true' && steps.buildimg.outputs.succeeded == 'true' }}
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: local/test-insecure:${{ github.sha }}
           scanners: 'vuln'
@@ -154,7 +154,7 @@ jobs:
 
       # FS 1/2 — Vulnerabilities (CVEs)
       - name: Trivy FS scan (SARIF - CVEs)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -177,7 +177,7 @@ jobs:
 
       # FS 2/2 — Secrets
       - name: Trivy FS scan (SARIF - Secrets)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -200,7 +200,7 @@ jobs:
 
       # --- TRIVY: Config (IaC) — somente misconfig/IaC ---
       - name: Trivy Config scan (Dockerfile/IaC -> SARIF)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: 'config'
           scan-ref: '.'
@@ -224,7 +224,7 @@ jobs:
       # --- EXTRA: Scans específicos no Dockerfile detectado ---
       - name: Trivy Config+Secret (Dockerfile específico -> SARIF)
         if: ${{ steps.dfile.outputs.found == 'true' }}
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: 'config'
           scan-ref: '${{ steps.dfile.outputs.path }}'
