@@ -81,18 +81,18 @@ jobs:
           sarif_file: semgrep.sarif
 
       # =========================
-      # TRIVY - FILESYSTEM
+      # TRIVY — FILESYSTEM
       # =========================
       - name: Run Trivy (filesystem: vuln + secrets + misconfig)
         uses: aquasecurity/trivy-action@v0.33.1
         with:
           scan-type: fs
-          scan-ref: .
+          scan-ref: '.'
           format: json
           output: trivy-results.json
-          severity: CRITICAL,HIGH,MEDIUM,LOW
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
         env:
-          TRIVY_SCANNERS: vuln,secret,misconfig
+          TRIVY_SCANNERS: 'vuln,secret,misconfig'
 
       # =========================
       # DOCKER BUILD + TRIVY IMAGE
@@ -102,7 +102,7 @@ jobs:
           if [ -f Dockerfile ]; then
             docker build -t local/test-insecure:${{ github.sha }} .
           else
-            echo "No Dockerfile found, skipping image build."
+            echo "No Dockerfile at $PWD, skipping image build."
           fi
 
       - name: Trivy Image (if image exists)
@@ -158,7 +158,7 @@ jobs:
           path: custom-review.json
 
       # =========================
-      # PDF REPORT
+      # PDF
       # =========================
       - name: Generate PDF Report
         run: python scripts/generate_report.py
