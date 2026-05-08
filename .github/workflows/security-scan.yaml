@@ -1,12 +1,26 @@
 name: Security Scan
 
 on:
+  # 🔁 Reutilizável por outros repositórios
   workflow_call:
     inputs:
       project-path:
         required: false
         default: '.'
         type: string
+
+  # ▶ Execução direta (normal)
+  push:
+    branches: ["main"]
+
+  pull_request:
+    branches: ["main"]
+
+  schedule:
+    - cron: '16 14 * * 2'  # terças 14:16 UTC
+
+  workflow_dispatch:
+
 permissions:
   contents: read
   security-events: write
@@ -20,7 +34,7 @@ jobs:
         shell: bash
 
     steps:
-      - name: Checkout caller repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -28,12 +42,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install system deps
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
 
-      - name: Install Python deps
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install reportlab PyPDF2 semgrep
@@ -47,7 +61,7 @@ jobs:
       - name: Run Semgrep SARIF
         run: semgrep scan --config auto --sarif --output semgrep.sarif || true
 
-      - name: Convert JSON to CSV
+      - name: Convert Semgrep JSON to CSV
         run: |
           jq -r '
             ["Rule ID","Severity","File","Line","Message"],
@@ -75,12 +89,13 @@ jobs:
           }' semgrep.json > semgrep.report.json
 
       - name: Upload Semgrep SARIF
+        if: ${{ hashFiles('semgrep.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: semgrep.sarif
 
       # =========================
-      # TRIVY — FILESYSTEM
+      # TRIVY – FILESYSTEM
       # =========================
       - name: "Run Trivy (filesystem: vuln + secrets + misconfig)"
         uses: aquasecurity/trivy-action@v0.33.1
@@ -94,50 +109,16 @@ jobs:
           TRIVY_SCANNERS: 'vuln,secret,misconfig'
 
       # =========================
-      # DOCKER BUILD + TRIVY IMAGE
-      # =========================
-      - name: Build Docker image (if Dockerfile exists)
-        run: |
-          if [ -f Dockerfile ]; then
-            docker build -t local/test-insecure:${{ github.sha }} .
-          else
-            echo "No Dockerfile at $PWD, skipping image build."
-          fi
-
-      - name: Trivy Image (if image exists)
-        run: |
-          if docker image inspect local/test-insecure:${{ github.sha }} >/dev/null 2>&1; then
-            trivy image --format sarif --output trivy-image.sarif \
-              --severity CRITICAL,HIGH,MEDIUM,LOW \
-              local/test-insecure:${{ github.sha }}
-          else
-            echo "Image not found. Skipping image scan."
-          fi
-
-      - name: Upload Trivy Image SARIF
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-image-sarif
-          path: trivy-image.sarif
-          if-no-files-found: ignore
-
-      - name: Upload Trivy Image SARIF to Code Scanning
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-image.sarif
-        continue-on-error: true
-
-      # =========================
       # CUSTOM SECURITY REVIEW
       # =========================
-      - name: Checkout security templates (tools)
+      - name: Checkout security templates
         uses: actions/checkout@v4
         with:
           repository: JNDEVSEC/security-templates
           ref: v1
           path: .security-templates
 
-      - name: Run custom security review (FS)
+      - name: Run custom security review
         run: |
           python .security-templates/scripts/security_review.py \
             --root . \
@@ -146,17 +127,12 @@ jobs:
             --fail-on HIGH
 
       - name: Upload Custom Review SARIF
+        if: ${{ hashFiles('custom-review.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: custom-review.sarif
 
-      - name: Upload Custom Review JSON
-        uses: actions/upload-artifact@v4
-        with:
-          name: custom-review
-          path: custom-review.json
-
-      #=========================
+      # =========================
       # PDF
       # =========================
       - name: Generate PDF Report
@@ -175,7 +151,7 @@ jobs:
             semgrep.report.json
             semgrep.sarif
             trivy-results.json
-            trivy-image.sarif
             custom-review.json
             custom-review.sarif
             security-report.pdf
+          if-no-files-found: ignore
