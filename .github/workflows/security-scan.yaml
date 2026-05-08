@@ -23,6 +23,10 @@ permissions:
   contents: read
   security-events: write
 
+# ✅ FORÇA TODAS AS ACTIONS JAVASCRIPT A USAREM NODE.JS 24
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -32,19 +36,31 @@ jobs:
         shell: bash
 
     steps:
+      # =========================
+      # CHECKOUT
+      # =========================
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # =========================
+      # PYTHON
+      # =========================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      # =========================
+      # SYSTEM DEPS
+      # =========================
       - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
 
+      # =========================
+      # PYTHON DEPS
+      # =========================
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
@@ -95,7 +111,7 @@ jobs:
       # =========================
       # TRIVY – FILESYSTEM
       # =========================
-      - name: "Run Trivy (filesystem: vuln + secrets + misconfig)"
+      - name: Run Trivy (filesystem)
         uses: aquasecurity/trivy-action@v0.33.1
         with:
           scan-type: fs
