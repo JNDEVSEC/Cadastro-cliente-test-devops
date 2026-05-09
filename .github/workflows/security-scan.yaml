@@ -128,7 +128,7 @@ jobs:
       - name: Checkout security templates
         uses: actions/checkout@v4
         with:
-          repository: JNDEVSEC/security-templates
+          repository: JNDEVSEC/Cadastro-cliente-test-devops
           ref: v1
           path: .security-templates
 
