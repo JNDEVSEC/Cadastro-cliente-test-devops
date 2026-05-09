@@ -122,15 +122,13 @@ jobs:
         env:
           TRIVY_SCANNERS: 'vuln,secret,misconfig'
 
-      # =========================
-      # CUSTOM SECURITY REVIEW
-      # =========================
       - name: Checkout security templates
         uses: actions/checkout@v4
         with:
-          repository: JNDEVSEC/Cadastro-cliente-test-devops
+          repository: JNDEVSEC/security-templates
           ref: v1
           path: .security-templates
+          token: ${{ secrets.SECURITY_TEMPLATES_TOKEN }}
 
       - name: Run custom security review
         run: |
