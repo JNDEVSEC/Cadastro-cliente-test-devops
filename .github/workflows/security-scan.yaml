@@ -27,7 +27,7 @@ jobs:
   scan:
     runs-on: ubuntu-latest
 
-    # ✅ FORÇA TODAS AS JAVASCRIPT ACTIONS A USAREM NODE 24
+    # ✅ Node 24 para todas as JS Actions
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -38,7 +38,7 @@ jobs:
 
     steps:
       # =========================
-      # CHECKOUT
+      # CHECKOUT DO PRÓPRIO REPO
       # =========================
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -54,7 +54,7 @@ jobs:
       # =========================
       # SYSTEM DEPS
       # =========================
-      - name: Install system deps
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
@@ -110,9 +110,9 @@ jobs:
           sarif_file: semgrep.sarif
 
       # =========================
-      # TRIVY – FILESYSTEM
+      # TRIVY
       # =========================
-      - name: Run Trivy (filesystem scan)
+      - name: Run Trivy (filesystem)
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: fs
@@ -124,19 +124,11 @@ jobs:
           TRIVY_SCANNERS: 'vuln,secret,misconfig'
 
       # =========================
-      # CUSTOM SECURITY REVIEW
+      # CUSTOM SECURITY REVIEW (LOCAL)
       # =========================
-      - name: Checkout security templates
-        uses: actions/checkout@v4
-        with:
-          repository: JNDEVSEC/security-templates
-          ref: v1
-          path: .security-templates
-          token: ${{ secrets.SECURITY_TEMPLATES_TOKEN }}
-
-      - name: Run custom security review
+      - name: Run custom security review (local scripts)
         run: |
-          python .security-templates/scripts/security_review.py \
+          python scripts/security_review.py \
             --root . \
             --json-out custom-review.json \
             --sarif-out custom-review.sarif \
@@ -149,7 +141,7 @@ jobs:
           sarif_file: custom-review.sarif
 
       # =========================
-      # PDF REPORT
+      # PDF REPORT (LOCAL)
       # =========================
       - name: Generate PDF security report
         run: python scripts/generate_report.py
