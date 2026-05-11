@@ -4,33 +4,27 @@ import re
 import time
 import subprocess
 import platform
-import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 
-# ==========================================================
+# =========================
 # ENV
-# ==========================================================
+# =========================
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
 CAMINHO_GEMINI = os.getenv("CAMINHO_GEMINI")
 MAX_CVES = int(os.getenv("MAX_CVES", 3))
-
 SEVERIDADES_VALIDAS = {"HIGH", "CRITICAL"}
 
-# ==========================================================
+# =========================
 # GEMINI EXEC
-# ==========================================================
+# =========================
 def executar_gemini(prompt: str) -> str:
     if not CAMINHO_GEMINI or not os.path.exists(CAMINHO_GEMINI):
-        return "❌ Caminho do Gemini CLI não encontrado."
+        return "Caminho do Gemini CLI não encontrado."
 
-    if platform.system() == "Windows":
-        comando = ["cmd", "/c", CAMINHO_GEMINI]
-    else:
-        comando = [CAMINHO_GEMINI]
+    comando = ["cmd", "/c", CAMINHO_GEMINI] if platform.system() == "Windows" else [CAMINHO_GEMINI]
 
     resultado = subprocess.run(
         comando,
@@ -40,104 +34,74 @@ def executar_gemini(prompt: str) -> str:
         env={**os.environ, "GEMINI_API_KEY": GEMINI_API_KEY},
     )
 
-    if resultado.stdout:
-        return resultado.stdout.strip()
+    return resultado.stdout.strip() if resultado.stdout else "Sem resposta da IA."
 
-    return f"⚠️ Nenhuma saída do Gemini. STDERR: {resultado.stderr.strip()}"
-
-# ==========================================================
+# =========================
 # TRIVY PARSER
-# ==========================================================
-def carregar_vulnerabilidades_trivy(caminho: str) -> pd.DataFrame:
-    if not os.path.exists(caminho):
-        print("❌ trivy.json não encontrado.")
-        return pd.DataFrame()
+# =========================
+def carregar_trivy():
+    if not os.path.exists("trivy.json"):
+        return []
 
-    with open(caminho, "r", encoding="utf-8") as f:
+    with open("trivy.json", "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    registros = []
+    achados = []
 
     for result in data.get("Results", []):
-        if result.get("Type") != "library":
-            continue
+        for v in result.get("Vulnerabilities") or []:
+            if v.get("Severity", "").upper() in SEVERIDADES_VALIDAS:
+                achados.append({
+                    "CVE": v.get("VulnerabilityID"),
+                    "Pacote": v.get("PkgName"),
+                    "Descricao": v.get("Description", "")
+                })
 
-        for vuln in result.get("Vulnerabilities") or []:
-            sev = vuln.get("Severity", "").upper()
-            if sev not in SEVERIDADES_VALIDAS:
-                continue
+    return achados[:MAX_CVES]
 
-            registros.append({
-                "CVE_ID": vuln.get("VulnerabilityID"),
-                "Componente": vuln.get("PkgName"),
-                "Descricao": vuln.get("Description", "Descrição não fornecida"),
-                "Severidade": sev,
-            })
+# =========================
+# MAIN
+# =========================
+def main():
+    vulns = carregar_trivy()
 
-    return pd.DataFrame(registros).drop_duplicates()
+    if not vulns:
+        print("Nenhuma vulnerabilidade HIGH/CRITICAL para análise por IA.")
+        return
 
-# ==========================================================
-# IA
-# ==========================================================
-def consultar_gemini(cve_id, componente, descricao):
-    prompt = f"""
-Analise a vulnerabilidade abaixo e responda **em português**, SEM introduções.
+    blocos = []
 
-CVE: {cve_id}
-Componente: {componente}
-Descrição: {descricao}
+    for v in vulns:
+        prompt = f"""
+Analise a vulnerabilidade abaixo e responda em português.
 
-Responda exatamente nesta estrutura:
+CVE: {v['CVE']}
+Componente: {v['Pacote']}
+Descrição: {v['Descricao']}
+
+Estrutura obrigatória:
 1. Impacto
 2. Correção ou mitigação
 3. Conclusão
 """
-    return executar_gemini(prompt)
+        resposta = executar_gemini(prompt)
 
-def separar_blocos(texto):
-    blocos = re.findall(r"\d\.\s*(.*?)\s*(?=\d\.|$)", texto, re.DOTALL)
-    blocos = [re.sub(r"\s+", " ", b).strip() for b in blocos]
-    while len(blocos) < 3:
-        blocos.append("Não identificado")
-    return blocos[:3]
+        partes = re.findall(r"\d\.\s*(.*?)\s*(?=\d\.|$)", resposta, re.DOTALL)
+        while len(partes) < 3:
+            partes.append("Não identificado")
 
-# ==========================================================
-# MAIN
-# ==========================================================
-def main():
-    df = carregar_vulnerabilidades_trivy("trivy.json")
-
-    if df.empty:
-        print("✅ Nenhuma vulnerabilidade HIGH / CRITICAL encontrada.")
-        return
-
-    df = df.head(MAX_CVES)
-
-    relatorio = []
-    print(f"🤖 Analisando {len(df)} vulnerabilidades com IA...\n")
-
-    for _, row in df.iterrows():
-        resposta = consultar_gemini(
-            row["CVE_ID"],
-            row["Componente"],
-            row["Descricao"]
-        )
-
-        impacto, correcao, conclusao = separar_blocos(resposta)
-
-        relatorio.append(f"""
-🔐 CVE: {row["CVE_ID"]}
-📦 Componente: {row["Componente"]}
-🔥 Severidade: {row["Severidade"]}
+        blocos.append(f"""
+🔐 CVE: {v['CVE']}
+📦 Componente: {v['Pacote']}
 
 🧨 Impacto:
-{impacto}
+{partes[0]}
 
 🛠️ Correção:
-{correcao}
+{partes[1]}
 
 ✅ Conclusão:
-{conclusao}
+{partes[2]}
 --------------------------------------------------
 """)
 
@@ -145,9 +109,9 @@ def main():
 
     nome = f"Relatorio_Correcoes_SCA_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     with open(nome, "w", encoding="utf-8") as f:
-        f.write("\n".join(relatorio))
+        f.write("\n".join(blocos))
 
-    print(f"✅ Relatório gerado: {nome}")
+    print(f"Relatório de correções gerado: {nome}")
 
 if __name__ == "__main__":
     main()
