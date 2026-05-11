@@ -1,117 +1,113 @@
-import os
-import json
-import re
-import time
-import subprocess
-import platform
-from datetime import datetime
-from dotenv import load_dotenv
+name: Security Scan
 
-# =========================
-# ENV
-# =========================
-load_dotenv()
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-CAMINHO_GEMINI = os.getenv("CAMINHO_GEMINI")
-MAX_CVES = int(os.getenv("MAX_CVES", 3))
-SEVERIDADES_VALIDAS = {"HIGH", "CRITICAL"}
+permissions:
+  contents: write
+  security-events: write
 
-# =========================
-# GEMINI EXEC
-# =========================
-def executar_gemini(prompt: str) -> str:
-    if not CAMINHO_GEMINI or not os.path.exists(CAMINHO_GEMINI):
-        return "Caminho do Gemini CLI não encontrado."
+jobs:
+# ======================================================
+# SCAN (scan + summary + IA advisory)
+# ======================================================
+  scan:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-    comando = ["cmd", "/c", CAMINHO_GEMINI] if platform.system() == "Windows" else [CAMINHO_GEMINI]
+    steps:
+      - uses: actions/checkout@v4
 
-    resultado = subprocess.run(
-        comando,
-        input=prompt,
-        capture_output=True,
-        encoding="utf-8",
-        env={**os.environ, "GEMINI_API_KEY": GEMINI_API_KEY},
-    )
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    return resultado.stdout.strip() if resultado.stdout else "Sem resposta da IA."
+      - name: Install Python deps
+        run: pip install python-dotenv
 
-# =========================
-# TRIVY PARSER
-# =========================
-def carregar_trivy():
-    if not os.path.exists("trivy.json"):
-        return []
+      # ---------------- TRIVY ----------------
+      - name: Trivy SCA
+        uses: aquasecurity/trivy-action@v0.35.0
+        continue-on-error: true
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: trivy.json
 
-    with open("trivy.json", "r", encoding="utf-8") as f:
-        data = json.load(f)
+      - name: Upload Trivy results
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-results
+          path: trivy.json
 
-    achados = []
+      # ---------------- IA ADVISORY ----------------
+      - name: Generate AI corrections (advisory)
+        run: python scripts/correcaosca.py || true
 
-    for result in data.get("Results", []):
-        for v in result.get("Vulnerabilities") or []:
-            if v.get("Severity", "").upper() in SEVERIDADES_VALIDAS:
-                achados.append({
-                    "CVE": v.get("VulnerabilityID"),
-                    "Pacote": v.get("PkgName"),
-                    "Descricao": v.get("Description", "")
-                })
+      - name: Upload AI correction reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-ai-corrections
+          path: Relatorio_Correcoes_SCA_*.txt
+          if-no-files-found: ignore
 
-    return achados[:MAX_CVES]
+      # ---------------- SUMMARY ----------------
+      - name: Scan Summary (Security + AI)
+        run: |
+          echo "## 🔐 Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
-# =========================
-# MAIN
-# =========================
-def main():
-    vulns = carregar_trivy()
+          HIGH=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy.json)
+          MEDIUM=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy.json)
+          LOW=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="LOW")] | length' trivy.json)
 
-    if not vulns:
-        print("Nenhuma vulnerabilidade HIGH/CRITICAL para análise por IA.")
-        return
+          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔴 HIGH | $HIGH |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟠 MEDIUM | $MEDIUM |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟢 LOW | $LOW |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Job summary generated at run-time_" >> $GITHUB_STEP_SUMMARY
 
-    blocos = []
+          if ls Relatorio_Correcoes_SCA_*.txt 1> /dev/null 2>&1; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## 🤖 AI Remediation Summary (Advisory)" >> $GITHUB_STEP_SUMMARY
+            echo "_Sugestões de correção geradas por IA. Não influenciam o security gate._" >> $GITHUB_STEP_SUMMARY
 
-    for v in vulns:
-        prompt = f"""
-Analise a vulnerabilidade abaixo e responda em português.
+            for f in Relatorio_Correcoes_SCA_*.txt; do
+              echo "### 📄 $f" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              sed -n '1,60p' "$f" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            done
+          fi
 
-CVE: {v['CVE']}
-Componente: {v['Pacote']}
-Descrição: {v['Descricao']}
+# ======================================================
+# SECURITY GATE (SOMENTE SCAN)
+# ======================================================
+  policy-gate:
+    runs-on: ubuntu-latest
+    needs: scan
+    if: github.ref == 'refs/heads/main'
 
-Estrutura obrigatória:
-1. Impacto
-2. Correção ou mitigação
-3. Conclusão
-"""
-        resposta = executar_gemini(prompt)
+    steps:
+      - name: Download scan results
+        uses: actions/download-artifact@v4
+        with:
+          name: security-results
 
-        partes = re.findall(r"\d\.\s*(.*?)\s*(?=\d\.|$)", resposta, re.DOTALL)
-        while len(partes) < 3:
-            partes.append("Não identificado")
+      - name: Enforce security policy
+        run: |
+          HIGH=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy.json)
 
-        blocos.append(f"""
-🔐 CVE: {v['CVE']}
-📦 Componente: {v['Pacote']}
+          if [ "$HIGH" -gt 0 ]; then
+            echo "Security gate failed"
+            exit 1
+          fi
 
-🧨 Impacto:
-{partes[0]}
-
-🛠️ Correção:
-{partes[1]}
-
-✅ Conclusão:
-{partes[2]}
---------------------------------------------------
-""")
-
-        time.sleep(30)
-
-    nome = f"Relatorio_Correcoes_SCA_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-    with open(nome, "w", encoding="utf-8") as f:
-        f.write("\n".join(blocos))
-
-    print(f"Relatório de correções gerado: {nome}")
-
-if __name__ == "__main__":
-    main()
+          echo "Security gate passed"
