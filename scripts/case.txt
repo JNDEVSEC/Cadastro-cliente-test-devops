@@ -1,0 +1,18 @@
+Analise a seguinte vulnerabilidade:
+
+🔐 CVE: {row['CVE_ID']}
+📦 Componente afetado: {row['Componente_Alvo']}
+📄 Descrição: {row['Descricao_API']}
+
+Responda com os seguintes tópicos numerados:
+1. Impacto potencial
+2. Correções ou mitigações recomendadas
+3. Conclusão
+
+Regras de resposta:
+- Fique atento pois pode haver componentes que ao consultar não tem nada a ver, exemplo Async pode ser componente ou pode estar qualificando algo
+- Seja claro, direto e tecnicamente preciso
+- Não repita a descrição original
+- Não inclua frases genéricas como “vou analisar” ou “com base na descrição”
+- Retorne apenas o conteúdo da análise, sem introduções ou interações
+- Não repita as perguntas do prompt
