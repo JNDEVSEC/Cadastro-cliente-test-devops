@@ -26,6 +26,30 @@ def inferir_proxima_versao_segura(versao: str) -> str:
     except InvalidVersion:
         return "Não informado"
 
+def escolher_versao_segura_trivy(instalada: str, fixed_versions: str) -> str:
+    """
+    Escolhe a menor versão segura MAIOR que a instalada.
+    Ex:
+      instalada=1.4.7
+      fixed=1.3.12, 1.4.12, 1.2.13
+      -> 1.4.12
+    """
+    try:
+        instalada_v = Version(instalada)
+        fixes = [
+            Version(v.strip())
+            for v in fixed_versions.split(",")
+            if v.strip()
+        ]
+
+        candidatas = [v for v in fixes if v > instalada_v]
+        if candidatas:
+            return str(min(candidatas))
+
+        return str(max(fixes))
+    except Exception:
+        return fixed_versions
+
 # ==================================================
 # ECOSSISTEMAS
 # ==================================================
@@ -63,7 +87,7 @@ def buscar_versao_npm(pacote: str) -> str | None:
     return None
 
 # ==================================================
-# NVD – BUSCAR / INFERIR VERSÃO SEGURA
+# NVD
 # ==================================================
 def obter_versao_nao_vulneravel_nvd(cve_id: str, versao_instalada: str | None = None) -> tuple[str, str]:
     url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -95,14 +119,13 @@ def obter_versao_nao_vulneravel_nvd(cve_id: str, versao_instalada: str | None = 
         if versoes:
             return min(versoes), "OFICIAL (NVD)"
 
-        # 2️⃣ Referências (Release Notes)
+        # 2️⃣ Referências
         for ref in cve.get("references", []):
-            url_ref = ref.get("url", "")
-            m = re.search(r"(\d+\.\d+\.\d+)", url_ref)
+            m = re.search(r"(\d+\.\d+\.\d+)", ref.get("url", ""))
             if m:
                 return m.group(1), "OFICIAL (REFERENCIA)"
 
-        # 3️⃣ Fallback heurístico
+        # 3️⃣ Inferido
         if versao_instalada and versao_instalada not in ["", "Desconhecida"]:
             return inferir_proxima_versao_segura(versao_instalada), "⚠️ INFERIDA"
 
@@ -134,10 +157,13 @@ def extrair_vulnerabilidades(sbom: dict) -> list:
                 instalada = v.get("InstalledVersion", "Desconhecida")
                 componente = v.get("PkgName")
 
-                # 1️⃣ Trivy
+                # ✅ 1️⃣ TRIVY (prioridade absoluta)
                 if v.get("FixedVersion"):
-                    versao_segura = v["FixedVersion"]
-                    origem = "OFICIAL (TRIVY)"
+                    versao_segura = escolher_versao_segura_trivy(
+                        instalada,
+                        v["FixedVersion"]
+                    )
+                    origem = "✅ OFICIAL (TRIVY)"
                 else:
                     # 2️⃣ NVD
                     versao_segura, origem = obter_versao_nao_vulneravel_nvd(
@@ -148,13 +174,13 @@ def extrair_vulnerabilidades(sbom: dict) -> list:
                     # 3️⃣ Ecossistemas
                     if versao_segura == "Não informado":
                         if ":" in componente:
-                            v_maven = buscar_versao_maven(componente)
-                            if v_maven:
-                                versao_segura, origem = v_maven, "OFICIAL (MAVEN)"
+                            v_mvn = buscar_versao_maven(componente)
+                            if v_mvn:
+                                versao_segura, origem = v_mvn, "OFICIAL (MAVEN)"
                         else:
-                            v_pypi = buscar_versao_pypi(componente)
-                            if v_pypi:
-                                versao_segura, origem = v_pypi, "OFICIAL (PYPI)"
+                            v_py = buscar_versao_pypi(componente)
+                            if v_py:
+                                versao_segura, origem = v_py, "OFICIAL (PYPI)"
                             else:
                                 v_npm = buscar_versao_npm(componente)
                                 if v_npm:
