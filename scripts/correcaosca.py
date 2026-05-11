@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import shutil
 import re
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 from packaging.version import Version, InvalidVersion
@@ -27,10 +28,6 @@ def inferir_proxima_versao_segura(versao: str) -> str:
         return "Não informado"
 
 def escolher_versao_segura_trivy(instalada: str, fixed_versions: str) -> str:
-    """
-    Escolhe a menor versão segura MAIOR que a instalada
-    Ex: 1.4.7 -> 1.4.12
-    """
     try:
         instalada_v = Version(instalada)
         fixes = [Version(v.strip()) for v in fixed_versions.split(",") if v.strip()]
@@ -40,14 +37,20 @@ def escolher_versao_segura_trivy(instalada: str, fixed_versions: str) -> str:
         return fixed_versions
 
 # ==================================================
-# NVD (SEMPRE CONSULTAR)
+# NVD – CONSULTA OBRIGATÓRIA + LOG
 # ==================================================
-def obter_versao_nao_vulneravel_nvd(cve_id: str, versao_instalada: str | None = None) -> tuple[str, str]:
+def obter_versao_nao_vulneravel_nvd(cve_id: str, versao_instalada: str) -> tuple[str, str]:
+    print(f"🔎 [NVD] Consultando CVE {cve_id}...")
+    inicio = time.time()
+
     url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
     params = {"cveId": cve_id}
 
     try:
-        r = requests.get(url, params=params, timeout=20)
+        r = requests.get(url, params=params, timeout=30)
+        duracao = round(time.time() - inicio, 2)
+        print(f"⏱️ [NVD] Resposta em {duracao}s (HTTP {r.status_code})")
+
         if r.status_code != 200:
             return "Não informado", "NVD"
 
@@ -58,7 +61,7 @@ def obter_versao_nao_vulneravel_nvd(cve_id: str, versao_instalada: str | None = 
 
         cve = vulns[0]["cve"]
 
-        # 1️⃣ CPE version ranges
+        # ✅ CPE RANGES
         versoes = []
         for config in cve.get("configurations", []):
             for node in config.get("nodes", []):
@@ -70,21 +73,23 @@ def obter_versao_nao_vulneravel_nvd(cve_id: str, versao_instalada: str | None = 
                             versoes.append(match["versionEndIncluding"])
 
         if versoes:
+            print(f"✅ [NVD] Versão segura detectada: {min(versoes)}")
             return min(versoes), "OFICIAL (NVD)"
 
-        # 2️⃣ References (release notes)
+        # ✅ REFERENCES (release notes)
         for ref in cve.get("references", []):
             m = re.search(r"(\d+\.\d+\.\d+)", ref.get("url", ""))
             if m:
+                print(f"✅ [NVD] Versão extraída de referência: {m.group(1)}")
                 return m.group(1), "OFICIAL (REFERENCIA)"
 
-        # 3️⃣ Heurística
-        if versao_instalada not in ["", "Desconhecida", None]:
-            return inferir_proxima_versao_segura(versao_instalada), "⚠️ INFERIDA"
+        # ✅ FALLBACK
+        print("⚠️ [NVD] Nenhuma versão explícita encontrada")
+        return inferir_proxima_versao_segura(versao_instalada), "⚠️ INFERIDA"
 
-        return "Não informado", "NVD"
-
-    except Exception:
+    except Exception as e:
+        duracao = round(time.time() - inicio, 2)
+        print(f"❌ [NVD] Erro após {duracao}s: {e}")
         return "Não informado", "ERRO"
 
 # ==================================================
@@ -113,7 +118,7 @@ def extrair_vulnerabilidades(sbom: dict) -> list:
                 instalada = v.get("InstalledVersion", "Desconhecida")
                 componente = v.get("PkgName")
 
-                # 1️⃣ TRIVY (coleta)
+                # ✅ TRIVY (sempre coletar)
                 versao_trivy = None
                 if v.get("FixedVersion"):
                     versao_trivy = escolher_versao_segura_trivy(
@@ -121,22 +126,19 @@ def extrair_vulnerabilidades(sbom: dict) -> list:
                         v["FixedVersion"]
                     )
 
-                # 2️⃣ NVD (SEMPRE consultar)
+                # ✅ NVD (SEMPRE consultar)
                 versao_nvd, origem_nvd = obter_versao_nao_vulneravel_nvd(
                     v.get("VulnerabilityID"),
                     instalada
                 )
 
-                # 3️⃣ DECISÃO (prioridade)
+                # ✅ DECISÃO FINAL
                 if versao_trivy:
                     versao_final = versao_trivy
                     origem = "✅ OFICIAL (TRIVY)"
-                elif versao_nvd != "Não informado":
+                else:
                     versao_final = versao_nvd
                     origem = origem_nvd
-                else:
-                    versao_final = inferir_proxima_versao_segura(instalada)
-                    origem = "⚠️ INFERIDA"
 
                 result.append({
                     "CVE": v.get("VulnerabilityID"),
@@ -182,7 +184,7 @@ def main():
 
         vulns = extrair_vulnerabilidades(sbom)
         if not vulns:
-            print("✅ Nenhuma vulnerabilidade HIGH / CRITICAL")
+            print("✅ Nenhuma vulnerabilidade HIGH/CRITICAL")
             return
 
         gerar_relatorio_json(vulns)
@@ -191,5 +193,5 @@ def main():
         shutil.rmtree(temp)
 
 if __name__ == "__main__":
-    print("🚦 Iniciando correcaoscav2 (TRIVY + NVD + DT‑ready)")
+    print("🚦 Iniciando correcaoscav2 (TRIVY + NVD COMPROVADA)")
     main()
