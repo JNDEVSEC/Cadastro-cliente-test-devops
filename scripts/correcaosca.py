@@ -18,23 +18,30 @@ MAX_CVES = int(os.getenv("MAX_CVES", 3))
 SEVERIDADES_VALIDAS = {"HIGH", "CRITICAL"}
 
 # =========================
-# GEMINI EXEC
+# GEMINI EXEC (AJUSTADO)
 # =========================
 def executar_gemini(prompt: str) -> str:
     if not CAMINHO_GEMINI or not os.path.exists(CAMINHO_GEMINI):
         return "Caminho do Gemini CLI não encontrado."
 
-    comando = ["cmd", "/c", CAMINHO_GEMINI] if platform.system() == "Windows" else [CAMINHO_GEMINI]
+    # ✅ IMPORTANTE: --stdin para o Gemini receber o prompt
+    if platform.system() == "Windows":
+        comando = ["cmd", "/c", CAMINHO_GEMINI, "--stdin"]
+    else:
+        comando = [CAMINHO_GEMINI, "--stdin"]
 
     resultado = subprocess.run(
         comando,
         input=prompt,
         capture_output=True,
-        encoding="utf-8",
+        text=True,
         env={**os.environ, "GEMINI_API_KEY": GEMINI_API_KEY},
     )
 
-    return resultado.stdout.strip() if resultado.stdout else "Sem resposta da IA."
+    if resultado.stdout and resultado.stdout.strip():
+        return resultado.stdout.strip()
+
+    return f"SEM_RESPOSTA_DA_IA\nSTDERR: {resultado.stderr.strip()}"
 
 # =========================
 # TRIVY PARSER
@@ -60,6 +67,14 @@ def carregar_trivy():
     return achados[:MAX_CVES]
 
 # =========================
+# PARSER MAIS ROBUSTO
+# =========================
+def extrair_secao(texto, titulo):
+    padrao = rf"{titulo}:\s*(.*?)(?=\n[A-ZÁÉÍÓÚÇ][a-záéíóúç]+:|$)"
+    m = re.search(padrao, texto, re.DOTALL | re.MULTILINE)
+    return m.group(1).strip() if m else "Não identificado"
+
+# =========================
 # MAIN
 # =========================
 def main():
@@ -72,36 +87,45 @@ def main():
     blocos = []
 
     for v in vulns:
+        # ✅ PROMPT AJUSTADO (menos frágil)
         prompt = f"""
-Analise a vulnerabilidade abaixo e responda em português.
+Você é um analista de segurança.
 
+Responda OBRIGATORIAMENTE em português e exatamente neste formato,
+sem texto fora da estrutura:
+
+Impacto:
+<texto>
+
+Correção:
+<texto>
+
+Conclusão:
+<texto>
+
+Vulnerabilidade:
 CVE: {v['CVE']}
 Componente: {v['Pacote']}
 Descrição: {v['Descricao']}
-
-Estrutura obrigatória:
-1. Impacto
-2. Correção ou mitigação
-3. Conclusão
 """
         resposta = executar_gemini(prompt)
 
-        partes = re.findall(r"\d\.\s*(.*?)\s*(?=\d\.|$)", resposta, re.DOTALL)
-        while len(partes) < 3:
-            partes.append("Não identificado")
+        impacto = extrair_secao(resposta, "Impacto")
+        correcao = extrair_secao(resposta, "Correção")
+        conclusao = extrair_secao(resposta, "Conclusão")
 
         blocos.append(f"""
 🔐 CVE: {v['CVE']}
 📦 Componente: {v['Pacote']}
 
 🧨 Impacto:
-{partes[0]}
+{impacto}
 
 🛠️ Correção:
-{partes[1]}
+{correcao}
 
 ✅ Conclusão:
-{partes[2]}
+{conclusao}
 --------------------------------------------------
 """)
 
