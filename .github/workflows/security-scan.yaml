@@ -103,6 +103,15 @@ jobs:
             done
           fi
 
+          
+      - name: Upload NVD correction report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-nvd-corrections
+          path: relatorio_correcoes_nvd_*.json
+          if-no-files-found: ignore
+
+
       # ---------------- ARTEFATOS PARA O GATE ----------------
       - uses: actions/upload-artifact@v4
         with:
