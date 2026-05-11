@@ -1,5 +1,4 @@
 Analise a seguinte vulnerabilidade:
-
 🔐 CVE: {row['CVE_ID']}
 📦 Componente afetado: {row['Componente_Alvo']}
 📄 Descrição: {row['Descricao_API']}
