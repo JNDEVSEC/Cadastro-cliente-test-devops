@@ -12,7 +12,7 @@ permissions:
 
 jobs:
 # ======================================================
-# SCAN (scan + summary + IA advisory)
+# SCAN (NUNCA FALHA)
 # ======================================================
   scan:
     runs-on: ubuntu-latest
@@ -27,10 +27,24 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python deps
-        run: pip install python-dotenv
+        run: |
+          pip install semgrep python-dotenv
+
+      # ---------------- SEMGREP ----------------
+      - name: Run Semgrep (JSON)
+        run: semgrep scan --config auto --json --output semgrep.json || true
+
+      - name: Run Semgrep (SARIF)
+        run: semgrep scan --config auto --sarif --output semgrep.sarif || true
+
+      - name: Upload Semgrep SARIF
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: semgrep.sarif
 
       # ---------------- TRIVY ----------------
-      - name: Trivy SCA
+      - name: Run Trivy SCA
         uses: aquasecurity/trivy-action@v0.35.0
         continue-on-error: true
         with:
@@ -39,22 +53,23 @@ jobs:
           format: json
           output: trivy.json
 
-      - name: Upload Trivy results
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-results
-          path: trivy.json
+      # ---------------- CUSTOM REVIEW ----------------
+      - name: Run security_review.py
+        run: |
+          python scripts/security_review.py \
+            --root . \
+            --json-out custom-review.json \
+            --sarif-out custom-review.sarif || true
 
-      # ---------------- IA ADVISORY ----------------
+      - name: Upload Custom Review SARIF
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: custom-review.sarif
+
+      # ---------------- IA (ADVISORY ONLY) ----------------
       - name: Generate AI corrections (advisory)
         run: python scripts/correcaosca.py || true
-
-      - name: Upload AI correction reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-ai-corrections
-          path: Relatorio_Correcoes_SCA_*.txt
-          if-no-files-found: ignore
 
       # ---------------- SUMMARY ----------------
       - name: Scan Summary (Security + AI)
@@ -62,33 +77,43 @@ jobs:
           echo "## 🔐 Security Scan Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          HIGH=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy.json)
-          MEDIUM=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy.json)
-          LOW=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="LOW")] | length' trivy.json)
+          TRIVY_HIGH=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy.json)
+          SEMGREP_HIGH=$(jq '[.results[]? | select(.extra.severity=="HIGH" or .extra.severity=="CRITICAL")] | length' semgrep.json)
+          CUSTOM_HIGH=$(jq '[.results[]? | select(.severity=="HIGH" or .severity=="CRITICAL")] | length' custom-review.json)
 
-          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔴 HIGH | $HIGH |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟠 MEDIUM | $MEDIUM |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟢 LOW | $LOW |" >> $GITHUB_STEP_SUMMARY
+          echo "| Fonte | HIGH / CRITICAL |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Trivy | $TRIVY_HIGH |" >> $GITHUB_STEP_SUMMARY
+          echo "| Semgrep | $SEMGREP_HIGH |" >> $GITHUB_STEP_SUMMARY
+          echo "| Custom Review | $CUSTOM_HIGH |" >> $GITHUB_STEP_SUMMARY
+
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "_Job summary generated at run-time_" >> $GITHUB_STEP_SUMMARY
 
           if ls Relatorio_Correcoes_SCA_*.txt 1> /dev/null 2>&1; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "## 🤖 AI Remediation Summary (Advisory)" >> $GITHUB_STEP_SUMMARY
-            echo "_Sugestões de correção geradas por IA. Não influenciam o security gate._" >> $GITHUB_STEP_SUMMARY
+            echo "_Sugestões de correção por IA. Não influenciam o security gate._" >> $GITHUB_STEP_SUMMARY
 
             for f in Relatorio_Correcoes_SCA_*.txt; do
-              echo "### 📄 $f" >> $GITHUB_STEP_SUMMARY
+              echo "### $f" >> $GITHUB_STEP_SUMMARY
               echo '```' >> $GITHUB_STEP_SUMMARY
               sed -n '1,60p' "$f" >> $GITHUB_STEP_SUMMARY
               echo '```' >> $GITHUB_STEP_SUMMARY
             done
           fi
 
+      # ---------------- ARTEFATOS PARA O GATE ----------------
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-results
+          path: |
+            trivy.json
+            semgrep.json
+            custom-review.json
+
 # ======================================================
-# SECURITY GATE (SOMENTE SCAN)
+# SECURITY GATE (QUEBRA POR HIGH / CRITICAL)
 # ======================================================
   policy-gate:
     runs-on: ubuntu-latest
@@ -96,18 +121,23 @@ jobs:
     if: github.ref == 'refs/heads/main'
 
     steps:
-      - name: Download scan results
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: security-results
 
       - name: Enforce security policy
         run: |
-          HIGH=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy.json)
+          TRIVY=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy.json)
+          SEMGREP=$(jq '[.results[]? | select(.extra.severity=="HIGH" or .extra.severity=="CRITICAL")] | length' semgrep.json)
+          CUSTOM=$(jq '[.results[]? | select(.severity=="HIGH" or .severity=="CRITICAL")] | length' custom-review.json)
 
-          if [ "$HIGH" -gt 0 ]; then
-            echo "Security gate failed"
+          TOTAL=$((TRIVY + SEMGREP + CUSTOM))
+
+          echo "HIGH/CRITICAL TOTAL: $TOTAL"
+
+          if [ "$TOTAL" -gt 0 ]; then
+            echo "❌ Security gate failed"
             exit 1
           fi
 
-          echo "Security gate passed"
+          echo "✅ Security gate passed"
