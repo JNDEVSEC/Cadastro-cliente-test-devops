@@ -27,6 +27,42 @@ def inferir_proxima_versao_segura(versao: str) -> str:
         return "Não informado"
 
 # ==================================================
+# ECOSSISTEMAS
+# ==================================================
+def buscar_versao_maven(componente: str) -> str | None:
+    try:
+        group, artifact = componente.split(":", 1)
+        url = (
+            "https://search.maven.org/solrsearch/select"
+            f"?q=g:{group}+AND+a:{artifact}&rows=1&wt=json"
+        )
+        r = requests.get(url, timeout=15)
+        docs = r.json().get("response", {}).get("docs", [])
+        if docs:
+            return docs[0].get("latestVersion")
+    except Exception:
+        pass
+    return None
+
+def buscar_versao_pypi(pacote: str) -> str | None:
+    try:
+        r = requests.get(f"https://pypi.org/pypi/{pacote}/json", timeout=15)
+        if r.status_code == 200:
+            return r.json().get("info", {}).get("version")
+    except Exception:
+        pass
+    return None
+
+def buscar_versao_npm(pacote: str) -> str | None:
+    try:
+        r = requests.get(f"https://registry.npmjs.org/{pacote}", timeout=15)
+        if r.status_code == 200:
+            return r.json().get("dist-tags", {}).get("latest")
+    except Exception:
+        pass
+    return None
+
+# ==================================================
 # NVD – BUSCAR / INFERIR VERSÃO SEGURA
 # ==================================================
 def obter_versao_nao_vulneravel_nvd(cve_id: str, versao_instalada: str | None = None) -> tuple[str, str]:
@@ -45,7 +81,7 @@ def obter_versao_nao_vulneravel_nvd(cve_id: str, versao_instalada: str | None = 
 
         cve = vulns[0]["cve"]
 
-        # 1️⃣ Tentativa por CPE range (preferencial)
+        # 1️⃣ CPE range
         versoes = []
         for config in cve.get("configurations", []):
             for node in config.get("nodes", []):
@@ -57,18 +93,18 @@ def obter_versao_nao_vulneravel_nvd(cve_id: str, versao_instalada: str | None = 
                             versoes.append(match["versionEndIncluding"])
 
         if versoes:
-            return min(versoes), "NVD"
+            return min(versoes), "OFICIAL (NVD)"
 
-        # 2️⃣ Tentativa por referências (release notes, advisory)
+        # 2️⃣ Referências (Release Notes)
         for ref in cve.get("references", []):
             url_ref = ref.get("url", "")
             m = re.search(r"(\d+\.\d+\.\d+)", url_ref)
             if m:
-                return m.group(1), "REFERENCIA"
+                return m.group(1), "OFICIAL (REFERENCIA)"
 
-        # 3️⃣ Fallback heurístico (inferido)
+        # 3️⃣ Fallback heurístico
         if versao_instalada and versao_instalada not in ["", "Desconhecida"]:
-            return inferir_proxima_versao_segura(versao_instalada), "INFERIDA"
+            return inferir_proxima_versao_segura(versao_instalada), "⚠️ INFERIDA"
 
         return "Não informado", "NVD"
 
@@ -96,20 +132,37 @@ def extrair_vulnerabilidades(sbom: dict) -> list:
         for v in r.get("Vulnerabilities", []) or []:
             if v.get("Severity", "").upper() in SEVERIDADES_VALIDAS:
                 instalada = v.get("InstalledVersion", "Desconhecida")
-                fixed_trivy = v.get("FixedVersion")
+                componente = v.get("PkgName")
 
-                if fixed_trivy:
-                    versao_segura = fixed_trivy
-                    origem = "TRIVY"
+                # 1️⃣ Trivy
+                if v.get("FixedVersion"):
+                    versao_segura = v["FixedVersion"]
+                    origem = "OFICIAL (TRIVY)"
                 else:
+                    # 2️⃣ NVD
                     versao_segura, origem = obter_versao_nao_vulneravel_nvd(
                         v.get("VulnerabilityID"),
                         instalada
                     )
 
+                    # 3️⃣ Ecossistemas
+                    if versao_segura == "Não informado":
+                        if ":" in componente:
+                            v_maven = buscar_versao_maven(componente)
+                            if v_maven:
+                                versao_segura, origem = v_maven, "OFICIAL (MAVEN)"
+                        else:
+                            v_pypi = buscar_versao_pypi(componente)
+                            if v_pypi:
+                                versao_segura, origem = v_pypi, "OFICIAL (PYPI)"
+                            else:
+                                v_npm = buscar_versao_npm(componente)
+                                if v_npm:
+                                    versao_segura, origem = v_npm, "OFICIAL (NPM)"
+
                 result.append({
                     "CVE": v.get("VulnerabilityID"),
-                    "Componente": v.get("PkgName"),
+                    "Componente": componente,
                     "Versao_Instalada": instalada,
                     "Versao_Segura": versao_segura,
                     "Origem_Versao": origem,
@@ -159,5 +212,5 @@ def main():
         shutil.rmtree(temp)
 
 if __name__ == "__main__":
-    print("🚦 Iniciando correcaoscav2 (Trivy + NVD + Inferência)")
+    print("🚦 Iniciando correcaoscav2 (Trivy + NVD + Ecossistema + Inferência)")
     main()
