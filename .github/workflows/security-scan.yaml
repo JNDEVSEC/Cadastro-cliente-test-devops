@@ -23,13 +23,14 @@ permissions:
   contents: read
   security-events: write
 
-# ✅ OPT-OUT OFICIAL PARA EVITAR ANNOTATION / EXIT CODE 1
-env:
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
-
 jobs:
   scan:
     runs-on: ubuntu-latest
+
+    # ✅ FORÇA TODAS AS JAVASCRIPT ACTIONS A USAREM NODE 24
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     defaults:
       run:
         working-directory: ${{ inputs.project-path || '.' }}
@@ -61,7 +62,7 @@ jobs:
       # =========================
       # PYTHON DEPS
       # =========================
-      - name: Install Python deps
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install reportlab PyPDF2 semgrep
@@ -69,13 +70,13 @@ jobs:
       # =========================
       # SEMGREP
       # =========================
-      - name: Run Semgrep JSON
+      - name: Run Semgrep (JSON)
         run: semgrep scan --config auto --json --output semgrep.json || true
 
-      - name: Run Semgrep SARIF
+      - name: Run Semgrep (SARIF)
         run: semgrep scan --config auto --sarif --output semgrep.sarif || true
 
-      - name: Convert JSON to CSV
+      - name: Convert Semgrep JSON to CSV
         run: |
           jq -r '
             ["Rule ID","Severity","File","Line","Message"],
@@ -88,7 +89,7 @@ jobs:
             ]) | @csv
           ' semgrep.json > semgrep.csv
 
-      - name: Build flat JSON
+      - name: Build flattened Semgrep JSON
         run: |
           jq '{
             results: [
@@ -111,7 +112,7 @@ jobs:
       # =========================
       # TRIVY – FILESYSTEM
       # =========================
-      - name: Run Trivy (filesystem)
+      - name: Run Trivy (filesystem scan)
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: fs
@@ -122,6 +123,9 @@ jobs:
         env:
           TRIVY_SCANNERS: 'vuln,secret,misconfig'
 
+      # =========================
+      # CUSTOM SECURITY REVIEW
+      # =========================
       - name: Checkout security templates
         uses: actions/checkout@v4
         with:
@@ -145,15 +149,15 @@ jobs:
           sarif_file: custom-review.sarif
 
       # =========================
-      # PDF
+      # PDF REPORT
       # =========================
-      - name: Generate PDF Report
+      - name: Generate PDF security report
         run: python scripts/generate_report.py
 
       # =========================
       # ARTEFATOS
       # =========================
-      - name: Upload reports
+      - name: Upload security reports
         uses: actions/upload-artifact@v4
         with:
           name: security-reports
