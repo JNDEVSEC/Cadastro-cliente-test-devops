@@ -76,7 +76,7 @@ jobs:
         with:
           name: security-nvd-corrections
           path: relatorio_correcoes_nvd_*.json
-          if-no-files-found: ignore      
+          if-no-files-found: ignore
 
       # ---------------- SUMMARY ----------------
       - name: Scan Summary (Security + AI)
@@ -93,40 +93,34 @@ jobs:
           echo "| Trivy | $TRIVY_HIGH |" >> $GITHUB_STEP_SUMMARY
           echo "| Semgrep | $SEMGREP_HIGH |" >> $GITHUB_STEP_SUMMARY
           echo "| Custom Review | $CUSTOM_HIGH |" >> $GITHUB_STEP_SUMMARY
-
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "_Job summary generated at run-time_" >> $GITHUB_STEP_SUMMARY
 
-          if ls Relatorio_Correcoes_SCA_*.txt 1> /dev/null 2>&1; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "## 🤖 AI Remediation Summary (Advisory)" >> $GITHUB_STEP_SUMMARY
-            echo "_Sugestões de correção por IA. Não influenciam o security gate._" >> $GITHUB_STEP_SUMMARY
-
-            for f in Relatorio_Correcoes_SCA_*.txt; do
-              echo "### $f" >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              sed -n '1,60p' "$f" >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-            done
-          fi
-
-          
+      # ---------------- NVD SUMMARY (CORRIGIDO) ----------------
       - name: NVD Fix Version Summary
+        shell: bash
         run: |
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## 🛠️ NVD – Versões não vulneráveis (NIST)" >> "$GITHUB_STEP_SUMMARY"
+
           if ls relatorio_correcoes_nvd_*.json 1> /dev/null 2>&1; then
-            echo "## 🛠️ NVD – Versões não vulneráveis" >> $GITHUB_STEP_SUMMARY
-            jq -r '.[] | "- **\(.Componente)** CVE \(.CVE) → ✅ Corrigir para **\(.Versao_Segura)**"' relatorio_correcoes_nvd_*.json >> $GITHUB_STEP_SUMMARY
+            jq -r '.[] |
+              "Componente: \(.Componente)\nCVE: \(.CVE)\nVersão não vulnerável: \(.Versao_Segura)\n"
+            ' relatorio_correcoes_nvd_*.json | while IFS= read -r linha; do
+              echo "- $linha" >> "$GITHUB_STEP_SUMMARY"
+            done
+          else
+            echo "_Nenhuma correção baseada na NVD foi gerada._" >> "$GITHUB_STEP_SUMMARY"
           fi
-      
-      
-            # ---------------- ARTEFATOS PARA O GATE ----------------
-            - uses: actions/upload-artifact@v4
-              with:
-                name: security-results
-                path: |
-                  trivy.json
-                  semgrep.json
-                  custom-review.json
+
+      # ---------------- ARTEFATOS PARA O GATE ----------------
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-results
+          path: |
+            trivy.json
+            semgrep.json
+            custom-review.json
 
 # ======================================================
 # SECURITY GATE (QUEBRA POR HIGH / CRITICAL)
