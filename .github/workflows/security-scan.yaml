@@ -1,145 +1,117 @@
-name: Security Scan
+import os
+import json
+import re
+import time
+import subprocess
+import platform
+from datetime import datetime
+from dotenv import load_dotenv
 
-on:
-  push:
-    branches: ["main"]
-  pull_request:
-  workflow_dispatch:
-  schedule:
-    - cron: '16 14 * * 2'
+# =========================
+# ENV
+# =========================
+load_dotenv()
 
-permissions:
-  contents: write
-  security-events: write
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+CAMINHO_GEMINI = os.getenv("CAMINHO_GEMINI")
+MAX_CVES = int(os.getenv("MAX_CVES", 3))
+SEVERIDADES_VALIDAS = {"HIGH", "CRITICAL"}
 
-jobs:
-# ======================================================
-# SCAN — NUNCA FALHA
-# ======================================================
-  scan:
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+# =========================
+# GEMINI EXEC
+# =========================
+def executar_gemini(prompt: str) -> str:
+    if not CAMINHO_GEMINI or not os.path.exists(CAMINHO_GEMINI):
+        return "Caminho do Gemini CLI não encontrado."
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    comando = ["cmd", "/c", CAMINHO_GEMINI] if platform.system() == "Windows" else [CAMINHO_GEMINI]
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+    resultado = subprocess.run(
+        comando,
+        input=prompt,
+        capture_output=True,
+        encoding="utf-8",
+        env={**os.environ, "GEMINI_API_KEY": GEMINI_API_KEY},
+    )
 
-      - name: Install deps
-        run: |
-          pip install semgrep PyPDF2 reportlab jq || true
+    return resultado.stdout.strip() if resultado.stdout else "Sem resposta da IA."
 
-      # -------------------------
-      # SEMGREP
-      # -------------------------
-      - name: Semgrep JSON
-        run: semgrep scan --config auto --json --output semgrep.json || true
+# =========================
+# TRIVY PARSER
+# =========================
+def carregar_trivy():
+    if not os.path.exists("trivy.json"):
+        return []
 
-      - name: Semgrep SARIF
-        run: semgrep scan --config auto --sarif --output semgrep.sarif || true
+    with open("trivy.json", "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-      - name: Upload Semgrep SARIF
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: semgrep.sarif
+    achados = []
 
-      # -------------------------
-      # TRIVY
-      # -------------------------
-      - name: Trivy FS
-        uses: aquasecurity/trivy-action@v0.35.0
-        continue-on-error: true
-        with:
-          scan-type: fs
-          scan-ref: .
-          output: trivy.json
-          format: json
+    for result in data.get("Results", []):
+        for v in result.get("Vulnerabilities") or []:
+            if v.get("Severity", "").upper() in SEVERIDADES_VALIDAS:
+                achados.append({
+                    "CVE": v.get("VulnerabilityID"),
+                    "Pacote": v.get("PkgName"),
+                    "Descricao": v.get("Description", "")
+                })
 
-      # -------------------------
-      # CUSTOM REVIEW (LOCAL)
-      # -------------------------
-      - name: Custom Security Review
-        run: |
-          python scripts/security_review.py \
-            --root . \
-            --json-out custom-review.json \
-            --sarif-out custom-review.sarif || true
+    return achados[:MAX_CVES]
 
-      - name: Upload Custom Review SARIF
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: custom-review.sarif
+# =========================
+# MAIN
+# =========================
+def main():
+    vulns = carregar_trivy()
 
-      # -------------------------
-      # JOB SUMMARY
-      # -------------------------
-      - name: Security Summary
-        run: |
-          HIGH=$(jq '[.results[]? | select(.severity=="HIGH")] | length' custom-review.json 2>/dev/null || echo 0)
-          MEDIUM=$(jq '[.results[]? | select(.severity=="MEDIUM")] | length' custom-review.json 2>/dev/null || echo 0)
-          LOW=$(jq '[.results[]? | select(.severity=="LOW")] | length' custom-review.json 2>/dev/null || echo 0)
+    if not vulns:
+        print("Nenhuma vulnerabilidade HIGH/CRITICAL para análise por IA.")
+        return
 
-          echo "## 🔐 Security Scan Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔴 HIGH | $HIGH |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟠 MEDIUM | $MEDIUM |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟢 LOW | $LOW |" >> $GITHUB_STEP_SUMMARY
+    blocos = []
 
-      # -------------------------
-      # BADGE (RISK)
-      # -------------------------
-      - name: Generate Risk Badge
-        run: |
-          HIGH=$(jq '[.results[]? | select(.severity=="HIGH")] | length' custom-review.json 2>/dev/null || echo 0)
-          if [ "$HIGH" -gt 0 ]; then
-            echo "HIGH 🔴" > security-risk.txt
-          else
-            echo "LOW 🟢" > security-risk.txt
-          fi
+    for v in vulns:
+        prompt = f"""
+Analise a vulnerabilidade abaixo e responda em português.
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-results
-          path: |
-            semgrep.json
-            semgrep.sarif
-            trivy.json
-            custom-review.json
-            custom-review.sarif
-            security-risk.txt
+CVE: {v['CVE']}
+Componente: {v['Pacote']}
+Descrição: {v['Descricao']}
 
-# ======================================================
-# POLICY GATE — SÓ QUEBRA NA MAIN
-# ======================================================
-  policy-gate:
-    runs-on: ubuntu-latest
-    needs: scan
-    if: github.ref == 'refs/heads/main'
+Estrutura obrigatória:
+1. Impacto
+2. Correção ou mitigação
+3. Conclusão
+"""
+        resposta = executar_gemini(prompt)
 
-    steps:
-      - name: Download security results
-        uses: actions/download-artifact@v4
-        with:
-          name: security-results
+        partes = re.findall(r"\d\.\s*(.*?)\s*(?=\d\.|$)", resposta, re.DOTALL)
+        while len(partes) < 3:
+            partes.append("Não identificado")
 
-      - name: Enforce Security Policy
-        run: |
-          HIGH=$(jq '[.results[]? | select(.severity=="HIGH")] | length' custom-review.json || echo 0)
-          echo "HIGH findings: $HIGH"
+        blocos.append(f"""
+🔐 CVE: {v['CVE']}
+📦 Componente: {v['Pacote']}
 
-          if [ "$HIGH" -gt 0 ]; then
-            echo "❌ Security policy violated"
-            exit 1
-          fi
+🧨 Impacto:
+{partes[0]}
 
-          echo "✅ Security policy passed"
+🛠️ Correção:
+{partes[1]}
+
+✅ Conclusão:
+{partes[2]}
+--------------------------------------------------
+""")
+
+        time.sleep(30)
+
+    nome = f"Relatorio_Correcoes_SCA_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    with open(nome, "w", encoding="utf-8") as f:
+        f.write("\n".join(blocos))
+
+    print(f"Relatório de correções gerado: {nome}")
+
+if __name__ == "__main__":
+    main()
