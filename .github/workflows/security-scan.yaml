@@ -71,6 +71,13 @@ jobs:
       - name: Generate AI corrections (advisory)
         run: python scripts/correcaosca.py || true
 
+      - name: Upload NVD correction report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-nvd-corrections
+          path: relatorio_correcoes_nvd_*.json
+          if-no-files-found: ignore      
+
       # ---------------- SUMMARY ----------------
       - name: Scan Summary (Security + AI)
         run: |
@@ -104,22 +111,22 @@ jobs:
           fi
 
           
-      - name: Upload NVD correction report
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-nvd-corrections
-          path: relatorio_correcoes_nvd_*.json
-          if-no-files-found: ignore
-
-
-      # ---------------- ARTEFATOS PARA O GATE ----------------
-      - uses: actions/upload-artifact@v4
-        with:
-          name: security-results
-          path: |
-            trivy.json
-            semgrep.json
-            custom-review.json
+      - name: NVD Fix Version Summary
+        run: |
+          if ls relatorio_correcoes_nvd_*.json 1> /dev/null 2>&1; then
+            echo "## 🛠️ NVD – Versões não vulneráveis" >> $GITHUB_STEP_SUMMARY
+            jq -r '.[] | "- **\(.Componente)** CVE \(.CVE) → ✅ Corrigir para **\(.Versao_Segura)**"' relatorio_correcoes_nvd_*.json >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      
+            # ---------------- ARTEFATOS PARA O GATE ----------------
+            - uses: actions/upload-artifact@v4
+              with:
+                name: security-results
+                path: |
+                  trivy.json
+                  semgrep.json
+                  custom-review.json
 
 # ======================================================
 # SECURITY GATE (QUEBRA POR HIGH / CRITICAL)
