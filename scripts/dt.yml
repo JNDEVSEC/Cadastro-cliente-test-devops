@@ -1,4 +1,4 @@
-   ## -> Evaluate SCA Security Gate
+## -> Evaluate SCA Security Gate
     - task: Bash@3
       displayName: "Evaluate Security Gate"
       condition: ne(variables.SKIP_SECURITY_GATE_SCA, 'true')
@@ -16,15 +16,39 @@
                           echo "##vso[task.logissue type=error;] The Dependency-Track API is not responding due to a unexpected error. Please, try again by clicking on Rerun Failed Jobs or contact X Thanks"
                           echo "##vso[task.complete result=Failed;]"
                           exit 1
-                        }     
+                        }
 
           COUNT=$(echo "$RESPONSE" | jq '[ .[] | select((.analysis.analysisState=="NOT_SET") or (.analysis == null) or (.analysis.analysisState == null)) ] | length')
 
           if [ "$COUNT" -gt 0 ]; then
             echo "##vso[task.logissue type=error;] Security Gate failed because critical and high potential vulnerabilities were found by our security tools in the source code for this project. For more information."
-           
 
-            echo "$RESPONSE" | jq -r '.[] | select((.analysis.analysisState=="NOT_SET") or (.analysis == null) or (.analysis.analysisState == null)) | "Component: \(.component.name) \nVersion: \(.component.version) \nComponent ID: \(.component.uuid) \nViolation ID: \(.uuid) \n----------------------------------------------"'
+            # itera cada violação e busca a versão que corrige no DTrack
+            echo "$RESPONSE" | jq -c '.[] | select((.analysis.analysisState=="NOT_SET") or (.analysis == null) or (.analysis.analysisState == null))' | while read -r VIOLATION; do
+              COMP_NAME=$(echo "$VIOLATION"    | jq -r '.component.name')
+              COMP_VERSION=$(echo "$VIOLATION" | jq -r '.component.version')
+              COMP_UUID=$(echo "$VIOLATION"    | jq -r '.component.uuid')
+              VIOLATION_ID=$(echo "$VIOLATION" | jq -r '.uuid')
+
+              # busca vulnerabilidades do componente para obter patchedVersions
+              VULN_RESPONSE=$(curl -sf \
+                -X GET "${DT_SCA_ENDPOINT}/v1/vulnerability/component/${COMP_UUID}" \
+                -H "X-API-Key: $(DEPENDENCY-TRACK-TOKEN)" \
+                -H 'Content-Type: application/json' 2>/dev/null) || VULN_RESPONSE="[]"
+
+              # extrai a menor patchedVersions dentre todas as CVEs do componente
+              PATCHED_VERSION=$(echo "$VULN_RESPONSE" | jq -r '
+                [ .[] | select(.patchedVersions != null and .patchedVersions != "")
+                  | .patchedVersions ] | first // "⚠️ No fix available"
+              ')
+
+              echo "Component:        $COMP_NAME"
+              echo "Version:          $COMP_VERSION"
+              echo "Fix Version:      $PATCHED_VERSION"
+              echo "Component ID:     $COMP_UUID"
+              echo "Violation ID:     $VIOLATION_ID"
+              echo "----------------------------------------------"
+            done
 
             echo "$RESPONSE" > "$(Build.ArtifactStagingDirectory)/sca-violations.json"
 
@@ -32,7 +56,7 @@
             exit
           fi
           echo "##[debug] No critical and high vulnerabilities were found that violate AppSec policies."
-       
+
 
     - task: PublishBuildArtifacts@1
       displayName: "Publicar relatório de vulnerabilidades SCA"
@@ -42,8 +66,9 @@
         artifactName: "sca-violations"
 
 
-      =================================================
-            - task: Bash@3
+# =================================================
+
+    - task: Bash@3
       displayName: "Evaluate Security Gate"
       condition: and( ne(variables.SKIP_SECURITY_GATE_SCA, 'true'), eq(variables.USE_DT_DOCKER, 'true'))
       inputs:
@@ -57,21 +82,43 @@
                         -X GET "${DT_SCA_ENDPOINT}/v1/violation/project/$(PROJECT_ID)?pageNumber=1&pageSize=1000" \
                         -H "X-API-Key: $(DEPENDENCY-TRACK-TOKEN)" \
                         -H 'Content-Type: application/json') || {
-                
                           echo "##vso[task.complete result=Failed;]"
                           exit 1
-                        }     
+                        }
 
           COUNT=$(echo "$RESPONSE" | jq '[ .[] | select((.analysis.analysisState=="NOT_SET") or (.analysis == null) or (.analysis.analysisState == null)) ] | length')
 
           if [ "$COUNT" -gt 0 ]; then
             echo "##vso[task.logissue type=error;] Security Gate failed because critical and high potential vulnerabilities were found by our security tools in the source code for this project. For more information."
-          
 
             echo "##[debug] The components listed below contain critical and/or high vulnerabilities and are currently blocking this project's pipeline. Please update them to allow the pipeline to proceed."
-                  
 
-            echo "$RESPONSE" | jq -r '.[] | select((.analysis.analysisState=="NOT_SET") or (.analysis == null) or (.analysis.analysisState == null)) | "Component: \(.component.name) \nVersion: \(.component.version) \nComponent ID: \(.component.uuid) \nViolation ID: \(.uuid) \n----------------------------------------------"'
+            # itera cada violação e busca a versão que corrige no DTrack
+            echo "$RESPONSE" | jq -c '.[] | select((.analysis.analysisState=="NOT_SET") or (.analysis == null) or (.analysis.analysisState == null))' | while read -r VIOLATION; do
+              COMP_NAME=$(echo "$VIOLATION"    | jq -r '.component.name')
+              COMP_VERSION=$(echo "$VIOLATION" | jq -r '.component.version')
+              COMP_UUID=$(echo "$VIOLATION"    | jq -r '.component.uuid')
+              VIOLATION_ID=$(echo "$VIOLATION" | jq -r '.uuid')
+
+              # busca vulnerabilidades do componente para obter patchedVersions
+              VULN_RESPONSE=$(curl -sf \
+                -X GET "${DT_SCA_ENDPOINT}/v1/vulnerability/component/${COMP_UUID}" \
+                -H "X-API-Key: $(DEPENDENCY-TRACK-TOKEN)" \
+                -H 'Content-Type: application/json' 2>/dev/null) || VULN_RESPONSE="[]"
+
+              # extrai a menor patchedVersions dentre todas as CVEs do componente
+              PATCHED_VERSION=$(echo "$VULN_RESPONSE" | jq -r '
+                [ .[] | select(.patchedVersions != null and .patchedVersions != "")
+                  | .patchedVersions ] | first // "⚠️ No fix available"
+              ')
+
+              echo "Component:        $COMP_NAME"
+              echo "Version:          $COMP_VERSION"
+              echo "Fix Version:      $PATCHED_VERSION"
+              echo "Component ID:     $COMP_UUID"
+              echo "Violation ID:     $VIOLATION_ID"
+              echo "----------------------------------------------"
+            done
 
             echo "$RESPONSE" > "$(Build.ArtifactStagingDirectory)/sca-violations.json"
 
@@ -79,5 +126,3 @@
             exit
           fi
           echo "##[debug] No critical and high vulnerabilities were found that violate AppSec policies."
-      
- 
