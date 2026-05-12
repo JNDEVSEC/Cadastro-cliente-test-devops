@@ -1,0 +1,83 @@
+   ## -> Evaluate SCA Security Gate
+    - task: Bash@3
+      displayName: "Evaluate Security Gate"
+      condition: ne(variables.SKIP_SECURITY_GATE_SCA, 'true')
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "##[debug] Dependency-Track Project ID: $(PROJECT_ID)"
+
+          set -e
+
+          RESPONSE=$(curl -sf \
+                        -X GET "${DT_SCA_ENDPOINT}/v1/violation/project/$(PROJECT_ID)?pageNumber=1&pageSize=1000" \
+                        -H "X-API-Key: $(DEPENDENCY-TRACK-TOKEN)" \
+                        -H 'Content-Type: application/json') || {
+                          echo "##vso[task.logissue type=error;] The Dependency-Track API is not responding due to a unexpected error. Please, try again by clicking on Rerun Failed Jobs or contact X Thanks"
+                          echo "##vso[task.complete result=Failed;]"
+                          exit 1
+                        }     
+
+          COUNT=$(echo "$RESPONSE" | jq '[ .[] | select((.analysis.analysisState=="NOT_SET") or (.analysis == null) or (.analysis.analysisState == null)) ] | length')
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "##vso[task.logissue type=error;] Security Gate failed because critical and high potential vulnerabilities were found by our security tools in the source code for this project. For more information."
+           
+
+            echo "$RESPONSE" | jq -r '.[] | select((.analysis.analysisState=="NOT_SET") or (.analysis == null) or (.analysis.analysisState == null)) | "Component: \(.component.name) \nVersion: \(.component.version) \nComponent ID: \(.component.uuid) \nViolation ID: \(.uuid) \n----------------------------------------------"'
+
+            echo "$RESPONSE" > "$(Build.ArtifactStagingDirectory)/sca-violations.json"
+
+            echo "##vso[task.complete result=Failed;]"
+            exit
+          fi
+          echo "##[debug] No critical and high vulnerabilities were found that violate AppSec policies."
+       
+
+    - task: PublishBuildArtifacts@1
+      displayName: "Publicar relatório de vulnerabilidades SCA"
+      condition: failed()
+      inputs:
+        pathToPublish: "$(Build.ArtifactStagingDirectory)/sca-violations.json"
+        artifactName: "sca-violations"
+
+
+      =================================================
+            - task: Bash@3
+      displayName: "Evaluate Security Gate"
+      condition: and( ne(variables.SKIP_SECURITY_GATE_SCA, 'true'), eq(variables.USE_DT_DOCKER, 'true'))
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "##[debug] Dependency-Track Project ID: $(PROJECT_ID)"
+
+          set -e
+
+          RESPONSE=$(curl -sf \
+                        -X GET "${DT_SCA_ENDPOINT}/v1/violation/project/$(PROJECT_ID)?pageNumber=1&pageSize=1000" \
+                        -H "X-API-Key: $(DEPENDENCY-TRACK-TOKEN)" \
+                        -H 'Content-Type: application/json') || {
+                
+                          echo "##vso[task.complete result=Failed;]"
+                          exit 1
+                        }     
+
+          COUNT=$(echo "$RESPONSE" | jq '[ .[] | select((.analysis.analysisState=="NOT_SET") or (.analysis == null) or (.analysis.analysisState == null)) ] | length')
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "##vso[task.logissue type=error;] Security Gate failed because critical and high potential vulnerabilities were found by our security tools in the source code for this project. For more information."
+          
+
+            echo "##[debug] The components listed below contain critical and/or high vulnerabilities and are currently blocking this project's pipeline. Please update them to allow the pipeline to proceed."
+                  
+
+            echo "$RESPONSE" | jq -r '.[] | select((.analysis.analysisState=="NOT_SET") or (.analysis == null) or (.analysis.analysisState == null)) | "Component: \(.component.name) \nVersion: \(.component.version) \nComponent ID: \(.component.uuid) \nViolation ID: \(.uuid) \n----------------------------------------------"'
+
+            echo "$RESPONSE" > "$(Build.ArtifactStagingDirectory)/sca-violations.json"
+
+            echo "##vso[task.complete result=Failed;]"
+            exit
+          fi
+          echo "##[debug] No critical and high vulnerabilities were found that violate AppSec policies."
+      
+ 
