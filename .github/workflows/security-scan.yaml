@@ -130,17 +130,79 @@ jobs:
 
       - name: Enforce security policy
         run: |
+          # ---------- contagens ----------
           TRIVY=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy.json)
           SEMGREP=$(jq '[.results[]? | select(.extra.severity=="HIGH" or .extra.severity=="CRITICAL")] | length' semgrep.json)
           CUSTOM=$(jq '[.results[]? | select(.severity=="HIGH" or .severity=="CRITICAL")] | length' custom-review.json)
 
           TOTAL=$((TRIVY + SEMGREP + CUSTOM))
 
+          # ---------- relatório Trivy no Summary ----------
+          echo "## 🔒 Security Gate Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$TRIVY" -gt 0 ]; then
+            echo "### 📦 SCA — Vulnerabilidades HIGH / CRITICAL (Trivy)" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Severidade | CVE | Componente | Versão instalada | Versão que corrige |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|:---:|---|---|:---:|:---:|" >> "$GITHUB_STEP_SUMMARY"
+
+            jq -r '
+              .Results[].Vulnerabilities[]?
+              | select(.Severity=="HIGH" or .Severity=="CRITICAL")
+              | [
+                  (if .Severity=="CRITICAL" then "🔴 CRITICAL" else "🟠 HIGH" end),
+                  (.VulnerabilityID // "N/A"),
+                  (.PkgName // "N/A"),
+                  (.InstalledVersion // "N/A"),
+                  (if (.FixedVersion // "") != "" then .FixedVersion else "⚠️ sem fix" end)
+                ]
+              | "| " + join(" | ") + " |"
+            ' trivy.json >> "$GITHUB_STEP_SUMMARY"
+
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # ---------- relatório Semgrep (se houver) ----------
+          if [ "$SEMGREP" -gt 0 ]; then
+            echo "### 🔍 SAST — Findings HIGH / CRITICAL (Semgrep)" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Severidade | Regra | Arquivo | Linha |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|:---:|---|---|:---:|" >> "$GITHUB_STEP_SUMMARY"
+
+            jq -r '
+              .results[]?
+              | select(.extra.severity=="HIGH" or .extra.severity=="CRITICAL")
+              | [
+                  .extra.severity,
+                  (.check_id // "N/A"),
+                  (.path // "N/A"),
+                  ((.start.line // 0) | tostring)
+                ]
+              | "| " + join(" | ") + " |"
+            ' semgrep.json >> "$GITHUB_STEP_SUMMARY"
+
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # ---------- resumo final ----------
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Scanner | HIGH/CRITICAL |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|:---:|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Trivy (SCA) | $TRIVY |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Semgrep (SAST) | $SEMGREP |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Custom Review | $CUSTOM |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Total** | **$TOTAL** |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ---------- gate ----------
           echo "HIGH/CRITICAL TOTAL: $TOTAL"
 
           if [ "$TOTAL" -gt 0 ]; then
+            echo "❌ Security gate failed — veja a tabela acima para detalhes e versões de correção" >> "$GITHUB_STEP_SUMMARY"
             echo "❌ Security gate failed"
             exit 1
           fi
 
+          echo "✅ Security gate passed" >> "$GITHUB_STEP_SUMMARY"
           echo "✅ Security gate passed"
