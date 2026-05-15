@@ -27,8 +27,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python deps
-        run: |
-          pip install semgrep python-dotenv
+        run: pip install semgrep python-dotenv
 
       # ---------------- SEMGREP ----------------
       - name: Run Semgrep (JSON)
@@ -78,7 +77,7 @@ jobs:
           path: relatorio_correcoes_nvd_*.json
           if-no-files-found: ignore
 
-     # ---------------- NVD SUMMARY (FORMATADO) ----------------
+      # ---------------- NVD SUMMARY (FORMATADO) ----------------
       - name: NVD Remediation Summary (Advisory)
         shell: bash
         run: |
@@ -94,7 +93,6 @@ jobs:
               COMP=$(echo "$item" | jq -r '.Componente')
               INST=$(echo "$item" | jq -r '.Versao_Instalada')
               FIX=$(echo "$item" | jq -r '.Versao_Segura')
-
               echo "**🔐 CVE:** $CVE" >> "$GITHUB_STEP_SUMMARY"
               echo "**📦 Componente:** $COMP" >> "$GITHUB_STEP_SUMMARY"
               echo "**📌 Versão instalada:** $INST" >> "$GITHUB_STEP_SUMMARY"
@@ -105,8 +103,56 @@ jobs:
             echo "_Nenhuma correção baseada na NVD foi gerada nesta execução._" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # ---------------- ENVIA PARA A PLATAFORMA ----------------
+      # Secrets necessários no GitHub:
+      #   PLATAFORMA_URL     = https://sua-instancia.com
+      #   PLATAFORMA_API_KEY = valor de WEBHOOK_API_KEY no settings.py
+      #
+      # auto_close=true: findings que sumiram do scan são fechados automaticamente
 
-      # ---------------- ARTEFATOS PARA O GATE ----------------
+      - name: Ingest Trivy → Plataforma
+        if: always()
+        run: |
+          curl -sf -X POST "${{ secrets.PLATAFORMA_URL }}/api/webhook/ingest/" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ secrets.PLATAFORMA_API_KEY }}" \
+            -d "{
+              \"projeto_nome\": \"${{ github.repository }}\",
+              \"fonte\": \"trivy\",
+              \"pipeline_run_id\": \"${{ github.run_id }}\",
+              \"auto_close\": true,
+              \"data\": $(cat trivy.json)
+            }" || echo "⚠️ Plataforma ingest falhou (não bloqueia o pipeline)"
+
+      - name: Ingest Semgrep → Plataforma
+        if: always()
+        run: |
+          curl -sf -X POST "${{ secrets.PLATAFORMA_URL }}/api/webhook/ingest/" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ secrets.PLATAFORMA_API_KEY }}" \
+            -d "{
+              \"projeto_nome\": \"${{ github.repository }}\",
+              \"fonte\": \"semgrep\",
+              \"pipeline_run_id\": \"${{ github.run_id }}\",
+              \"auto_close\": true,
+              \"data\": $(cat semgrep.json)
+            }" || echo "⚠️ Plataforma ingest falhou (não bloqueia o pipeline)"
+
+      - name: Ingest Custom Review → Plataforma
+        if: always()
+        run: |
+          curl -sf -X POST "${{ secrets.PLATAFORMA_URL }}/api/webhook/ingest/" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ secrets.PLATAFORMA_API_KEY }}" \
+            -d "{
+              \"projeto_nome\": \"${{ github.repository }}\",
+              \"fonte\": \"custom\",
+              \"pipeline_run_id\": \"${{ github.run_id }}\",
+              \"auto_close\": true,
+              \"data\": $(cat custom-review.json)
+            }" || echo "⚠️ Plataforma ingest falhou (não bloqueia o pipeline)"
+
+      # ---------------- ARTEFATOS PARA O GATE LOCAL ----------------
       - uses: actions/upload-artifact@v4
         with:
           name: security-results
@@ -116,7 +162,7 @@ jobs:
             custom-review.json
 
 # ======================================================
-# SECURITY GATE (QUEBRA POR HIGH / CRITICAL)
+# SECURITY GATE — consulta a plataforma
 # ======================================================
   policy-gate:
     runs-on: ubuntu-latest
@@ -128,81 +174,111 @@ jobs:
         with:
           name: security-results
 
-      - name: Enforce security policy
+      - name: Enforce security policy via Plataforma
         run: |
-          # ---------- contagens ----------
-          TRIVY=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy.json)
-          SEMGREP=$(jq '[.results[]? | select(.extra.severity=="HIGH" or .extra.severity=="CRITICAL")] | length' semgrep.json)
-          CUSTOM=$(jq '[.results[]? | select(.severity=="HIGH" or .severity=="CRITICAL")] | length' custom-review.json)
-
-          TOTAL=$((TRIVY + SEMGREP + CUSTOM))
-
-          # ---------- relatório Trivy no Summary ----------
           echo "## 🔒 Security Gate Report" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$TRIVY" -gt 0 ]; then
-            echo "### 📦 SCA — Vulnerabilidades HIGH / CRITICAL (Trivy)" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Severidade | CVE | Componente | Versão instalada | Versão que corrige |" >> "$GITHUB_STEP_SUMMARY"
-            echo "|:---:|---|---|:---:|:---:|" >> "$GITHUB_STEP_SUMMARY"
+          # ── Consulta a plataforma ──────────────────────────────────
+          # A plataforma já processou o scan:
+          #   - RISCO_ACEITO não conta como bloqueante
+          #   - Findings corrigidos foram fechados automaticamente
+          #   - Só ABERTO com HIGH/CRITICAL bloqueia
 
-            jq -r '
-              .Results[].Vulnerabilities[]?
-              | select(.Severity=="HIGH" or .Severity=="CRITICAL")
-              | [
-                  (if .Severity=="CRITICAL" then "🔴 CRITICAL" else "🟠 HIGH" end),
-                  (.VulnerabilityID // "N/A"),
-                  (.PkgName // "N/A"),
-                  (.InstalledVersion // "N/A"),
-                  (if (.FixedVersion // "") != "" then .FixedVersion else "⚠️ sem fix" end)
-                ]
-              | "| " + join(" | ") + " |"
-            ' trivy.json >> "$GITHUB_STEP_SUMMARY"
+          GATE_RESPONSE=$(curl -sf \
+            -H "X-API-Key: ${{ secrets.PLATAFORMA_API_KEY }}" \
+            "${{ secrets.PLATAFORMA_URL }}/api/gate-check/?projeto=${{ github.repository }}&fonte=trivy,semgrep,custom" \
+          ) || GATE_RESPONSE=""
 
+          if [ -n "$GATE_RESPONSE" ]; then
+            BLOQUEANTES=$(echo "$GATE_RESPONSE" | jq -r '.bloqueantes // 0')
+            CRITICAL=$(echo "$GATE_RESPONSE"    | jq -r '.critical // 0')
+            HIGH=$(echo "$GATE_RESPONSE"        | jq -r '.high // 0')
+            GATE_STATUS=$(echo "$GATE_RESPONSE" | jq -r '.gate_status // "UNKNOWN"')
+
+            echo "### 📊 Resultado da Plataforma" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            if [ "$BLOQUEANTES" -gt 0 ]; then
+              echo "### 📦 Vulnerabilidades bloqueantes (HIGH/CRITICAL abertos)" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "| Severidade | Título | Componente | Versão instalada | Versão que corrige |" >> "$GITHUB_STEP_SUMMARY"
+              echo "|:---:|---|---|:---:|:---:|" >> "$GITHUB_STEP_SUMMARY"
+
+              echo "$GATE_RESPONSE" | jq -r '
+                .findings[]
+                | [
+                    (if .severidade=="CRITICAL" then "🔴 CRITICAL" else "🟠 HIGH" end),
+                    (.titulo // "N/A"),
+                    (.componente // "N/A"),
+                    (.versao_instalada // "N/A"),
+                    (if (.versao_corrige // "") != "" then .versao_corrige else "⚠️ sem fix" end)
+                  ]
+                | "| " + join(" | ") + " |"
+              ' >> "$GITHUB_STEP_SUMMARY"
+
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            echo "---" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Métrica | Valor |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|:---:|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| 🔴 Critical bloqueantes | $CRITICAL |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| 🟠 High bloqueantes | $HIGH |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Total bloqueantes** | **$BLOQUEANTES** |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| ⚠️ Risco aceito (não bloqueia) | $(echo "$GATE_RESPONSE" | jq '[.findings[] | select(.status=="RISCO_ACEITO")] | length // 0') |" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            echo "HIGH/CRITICAL bloqueantes: $BLOQUEANTES"
+
+            if [ "$GATE_STATUS" = "FAIL" ]; then
+              echo "❌ Gate falhou — veja a tabela acima" >> "$GITHUB_STEP_SUMMARY"
+              echo "❌ Security gate failed"
+              exit 1
+            fi
+
+            echo "✅ Security gate passed" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ Security gate passed — nenhum HIGH/CRITICAL aberto"
+
+          else
+            # Plataforma indisponível → fallback nos JSONs locais
+            echo "⚠️ Plataforma indisponível — usando fallback local" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            TRIVY=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy.json)
+            SEMGREP=$(jq '[.results[]? | select(.extra.severity=="HIGH" or .extra.severity=="CRITICAL")] | length' semgrep.json)
+            CUSTOM=$(jq '[.results[]? | select(.severity=="HIGH" or .severity=="CRITICAL")] | length' custom-review.json)
+            TOTAL=$((TRIVY + SEMGREP + CUSTOM))
+
+            if [ "$TRIVY" -gt 0 ]; then
+              echo "### 📦 SCA — Vulnerabilidades HIGH/CRITICAL (Trivy — fallback)" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "| Severidade | CVE | Componente | Versão instalada | Versão que corrige |" >> "$GITHUB_STEP_SUMMARY"
+              echo "|:---:|---|---|:---:|:---:|" >> "$GITHUB_STEP_SUMMARY"
+              jq -r '
+                .Results[].Vulnerabilities[]?
+                | select(.Severity=="HIGH" or .Severity=="CRITICAL")
+                | [(if .Severity=="CRITICAL" then "🔴 CRITICAL" else "🟠 HIGH" end),
+                   (.VulnerabilityID // "N/A"), (.PkgName // "N/A"),
+                   (.InstalledVersion // "N/A"),
+                   (if (.FixedVersion // "") != "" then .FixedVersion else "⚠️ sem fix" end)]
+                | "| " + join(" | ") + " |"
+              ' trivy.json >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            echo "| Scanner | HIGH/CRITICAL |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|:---:|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Trivy | $TRIVY |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Semgrep | $SEMGREP |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Custom | $CUSTOM |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Total** | **$TOTAL** |" >> "$GITHUB_STEP_SUMMARY"
+
+            if [ "$TOTAL" -gt 0 ]; then
+              echo "❌ Security gate failed — veja a tabela acima" >> "$GITHUB_STEP_SUMMARY"
+              echo "❌ Security gate failed (fallback local)"
+              exit 1
+            fi
+            echo "✅ Security gate passed (fallback local)" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ Security gate passed"
           fi
-
-          # ---------- relatório Semgrep (se houver) ----------
-          if [ "$SEMGREP" -gt 0 ]; then
-            echo "### 🔍 SAST — Findings HIGH / CRITICAL (Semgrep)" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "| Severidade | Regra | Arquivo | Linha |" >> "$GITHUB_STEP_SUMMARY"
-            echo "|:---:|---|---|:---:|" >> "$GITHUB_STEP_SUMMARY"
-
-            jq -r '
-              .results[]?
-              | select(.extra.severity=="HIGH" or .extra.severity=="CRITICAL")
-              | [
-                  .extra.severity,
-                  (.check_id // "N/A"),
-                  (.path // "N/A"),
-                  ((.start.line // 0) | tostring)
-                ]
-              | "| " + join(" | ") + " |"
-            ' semgrep.json >> "$GITHUB_STEP_SUMMARY"
-
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          # ---------- resumo final ----------
-          echo "---" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Scanner | HIGH/CRITICAL |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|:---:|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Trivy (SCA) | $TRIVY |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Semgrep (SAST) | $SEMGREP |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Custom Review | $CUSTOM |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Total** | **$TOTAL** |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          # ---------- gate ----------
-          echo "HIGH/CRITICAL TOTAL: $TOTAL"
-
-          if [ "$TOTAL" -gt 0 ]; then
-            echo "❌ Security gate failed — veja a tabela acima para detalhes e versões de correção" >> "$GITHUB_STEP_SUMMARY"
-            echo "❌ Security gate failed"
-            exit 1
-          fi
-
-          echo "✅ Security gate passed" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Security gate passed"
