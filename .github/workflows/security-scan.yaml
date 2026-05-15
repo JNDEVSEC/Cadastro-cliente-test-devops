@@ -106,7 +106,7 @@ jobs:
       # ---------------- ENVIA PARA A PLATAFORMA ----------------
       # Secrets necessários no GitHub:
       #   PLATAFORMA_URL     = https://sua-instancia.com
-      #   PLATAFORMA_API_KEY = valor de WEBHOOK_API_KEY no settings.py
+      #   PLATAFORMA_API_KEY = "acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891"
       #
       # auto_close=true: findings que sumiram do scan são fechados automaticamente
 
