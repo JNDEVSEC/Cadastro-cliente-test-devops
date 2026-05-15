@@ -186,8 +186,8 @@ jobs:
           #   - Só ABERTO com HIGH/CRITICAL bloqueia
 
           GATE_RESPONSE=$(curl -sf \
-            -H "X-API-Key: ${{ secrets.PLATAFORMA_API_KEY }}" \
-            "${{ secrets.PLATAFORMA_URL }}/api/gate-check/?projeto=${{ github.repository }}&fonte=trivy,semgrep,custom" \
+            -H "X-API-Key: webhook-dev-key-change-me" \
+            "https://SUA-URL-NGROK.ngrok-free.app/api/gate-check/?projeto=${{ github.repository }}&fonte=trivy,semgrep,custom" \
           ) || GATE_RESPONSE=""
 
           if [ -n "$GATE_RESPONSE" ]; then
