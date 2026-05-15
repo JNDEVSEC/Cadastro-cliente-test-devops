@@ -3,8 +3,7 @@ FROM alpine:3.12
 
 # Segredos com padrões realistas
 ENV GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCDE \
-    AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE \
-    AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+   
     DEBUG=true
 
 USER root
