@@ -10,6 +10,14 @@ permissions:
   contents: write
   security-events: write
 
+# ── Substitua os dois valores abaixo pela sua URL do ngrok ──────────
+# NGROK_URL   → a URL gerada pelo ngrok (sem barra no final)
+#               ex: https://sauciness-ovary-clanking.ngrok-free.app
+# WEBHOOK_KEY → o mesmo valor de WEBHOOK_API_KEY no seu settings.py
+env:
+  NGROK_URL:   "https://sauciness-ovary-clanking.ngrok-free.app"
+  WEBHOOK_KEY: "acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891"
+
 jobs:
 # ======================================================
 # SCAN (NUNCA FALHA)
@@ -104,19 +112,12 @@ jobs:
           fi
 
       # ---------------- ENVIA PARA A PLATAFORMA ----------------
-      # Secrets necessários no GitHub:
-      #   PLATAFORMA_URL     = https://sua-instancia.com
-      #   PLATAFORMA_API_KEY = "acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891"
-      #
-      # auto_close=true: findings que sumiram do scan são fechados automaticamente
-
       - name: Ingest Trivy → Plataforma
         if: always()
         run: |
-          curl -sf -X POST "${{ secrets.PLATAFORMA_URL }}/api/webhook/ingest/" \
+          curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
-             -H "X-API-Key: webhook-dev-key-change-me" \
-            "https://sauciness-ovary-clanking.ngrok-free.dev -> http://localhost:8000/gate-check/
+            -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
             -d "{
               \"projeto_nome\": \"${{ github.repository }}\",
               \"fonte\": \"trivy\",
@@ -128,9 +129,9 @@ jobs:
       - name: Ingest Semgrep → Plataforma
         if: always()
         run: |
-          curl -sf -X POST "${{ secrets.PLATAFORMA_URL }}/api/webhook/ingest/" \
+          curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
-            -H "X-API-Key: ${{ secrets.PLATAFORMA_API_KEY }}" \
+            -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
             -d "{
               \"projeto_nome\": \"${{ github.repository }}\",
               \"fonte\": \"semgrep\",
@@ -142,10 +143,9 @@ jobs:
       - name: Ingest Custom Review → Plataforma
         if: always()
         run: |
-          curl -sf -X POST "${{ secrets.PLATAFORMA_URL }}/api/webhook/ingest/" \
+          curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
-             -H "X-API-Key: webhook-dev-key-change-me" \
-            "https://sauciness-ovary-clanking.ngrok-free.dev -> http://localhost:8000/gate-check/
+            -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
             -d "{
               \"projeto_nome\": \"${{ github.repository }}\",
               \"fonte\": \"custom\",
@@ -177,19 +177,16 @@ jobs:
           name: security-results
 
       - name: Enforce security policy via Plataforma
+        env:
+          NGROK_URL:   "https://sauciness-ovary-clanking.ngrok-free.app"
+          WEBHOOK_KEY: "acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891"
         run: |
           echo "## 🔒 Security Gate Report" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          # ── Consulta a plataforma ──────────────────────────────────
-          # A plataforma já processou o scan:
-          #   - RISCO_ACEITO não conta como bloqueante
-          #   - Findings corrigidos foram fechados automaticamente
-          #   - Só ABERTO com HIGH/CRITICAL bloqueia
-
           GATE_RESPONSE=$(curl -sf \
-            -H "X-API-Key: webhook-dev-key-change-me" \
-            "https://sauciness-ovary-clanking.ngrok-free.dev -> http://localhost:8000/gate-check/?projeto=${{ github.repository }}&fonte=trivy,semgrep,custom" \
+            -H "X-API-Key: $WEBHOOK_KEY" \
+            "$NGROK_URL/api/gate-check/?projeto=${{ github.repository }}&fonte=trivy,semgrep,custom" \
           ) || GATE_RESPONSE=""
 
           if [ -n "$GATE_RESPONSE" ]; then
@@ -228,7 +225,6 @@ jobs:
             echo "| 🔴 Critical bloqueantes | $CRITICAL |" >> "$GITHUB_STEP_SUMMARY"
             echo "| 🟠 High bloqueantes | $HIGH |" >> "$GITHUB_STEP_SUMMARY"
             echo "| **Total bloqueantes** | **$BLOQUEANTES** |" >> "$GITHUB_STEP_SUMMARY"
-            echo "| ⚠️ Risco aceito (não bloqueia) | $(echo "$GATE_RESPONSE" | jq '[.findings[] | select(.status=="RISCO_ACEITO")] | length // 0') |" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
 
             echo "HIGH/CRITICAL bloqueantes: $BLOQUEANTES"
@@ -243,7 +239,6 @@ jobs:
             echo "✅ Security gate passed — nenhum HIGH/CRITICAL aberto"
 
           else
-            # Plataforma indisponível → fallback nos JSONs locais
             echo "⚠️ Plataforma indisponível — usando fallback local" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
 
