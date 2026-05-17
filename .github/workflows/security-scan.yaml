@@ -115,7 +115,8 @@ jobs:
         run: |
           curl -sf -X POST "${{ secrets.PLATAFORMA_URL }}/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
-            -H "X-API-Key: ${{ secrets.PLATAFORMA_API_KEY }}" \
+             -H "X-API-Key: webhook-dev-key-change-me" \
+            "https://sauciness-ovary-clanking.ngrok-free.dev -> http://localhost:8000/gate-check/
             -d "{
               \"projeto_nome\": \"${{ github.repository }}\",
               \"fonte\": \"trivy\",
@@ -143,7 +144,8 @@ jobs:
         run: |
           curl -sf -X POST "${{ secrets.PLATAFORMA_URL }}/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
-            -H "X-API-Key: ${{ secrets.PLATAFORMA_API_KEY }}" \
+             -H "X-API-Key: webhook-dev-key-change-me" \
+            "https://sauciness-ovary-clanking.ngrok-free.dev -> http://localhost:8000/gate-check/
             -d "{
               \"projeto_nome\": \"${{ github.repository }}\",
               \"fonte\": \"custom\",
