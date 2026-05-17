@@ -10,11 +10,6 @@ permissions:
   contents: write
   security-events: write
 
-# ── Atualize estes dois valores quando o ngrok reiniciar ─────────────
-env:
-  NGROK_URL:   "https://sauciness-ovary-clanking.ngrok-free.app"
-  WEBHOOK_KEY: "acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891"
-
 jobs:
 # ======================================================
 # SCAN (NUNCA FALHA)
@@ -109,9 +104,8 @@ jobs:
           fi
 
       # ---------------- ENVIA PARA A PLATAFORMA ----------------
-      # ngrok-skip-browser-warning: bypassa a página de aviso do ngrok gratuito
 
-       - name: Ingest Trivy → Plataforma
+      - name: Ingest Trivy → Plataforma
         if: always()
         run: |
           jq -n \
@@ -120,23 +114,23 @@ jobs:
             --slurpfile data trivy.json \
             '{projeto_nome:$projeto,fonte:"trivy",pipeline_run_id:$run_id,auto_close:true,data:$data[0]}' \
             > _payload_trivy.json
- 
+
           HTTP=$(curl -s -o _resp_trivy.json -w "%{http_code}" \
             -X POST "https://sauciness-ovary-clanking.ngrok-free.app/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891" \
             -H "ngrok-skip-browser-warning: true" \
             --data @_payload_trivy.json)
- 
+
           echo "HTTP Status: $HTTP"
           cat _resp_trivy.json
- 
+
           if [ "$HTTP" = "200" ]; then
             echo "✅ Trivy OK — criados: $(jq -r '.criados//0' _resp_trivy.json) | reabertos: $(jq -r '.reabertos//0' _resp_trivy.json) | auto_fechados: $(jq -r '.auto_fechados//0' _resp_trivy.json)"
           else
             echo "⚠️ Trivy ingest falhou com HTTP $HTTP (não bloqueia o pipeline)"
           fi
- 
+
       - name: Ingest Semgrep → Plataforma
         if: always()
         run: |
@@ -146,23 +140,23 @@ jobs:
             --slurpfile data semgrep.json \
             '{projeto_nome:$projeto,fonte:"semgrep",pipeline_run_id:$run_id,auto_close:true,data:$data[0]}' \
             > _payload_semgrep.json
- 
+
           HTTP=$(curl -s -o _resp_semgrep.json -w "%{http_code}" \
             -X POST "https://sauciness-ovary-clanking.ngrok-free.app/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891" \
             -H "ngrok-skip-browser-warning: true" \
             --data @_payload_semgrep.json)
- 
+
           echo "HTTP Status: $HTTP"
           cat _resp_semgrep.json
- 
+
           if [ "$HTTP" = "200" ]; then
             echo "✅ Semgrep OK — criados: $(jq -r '.criados//0' _resp_semgrep.json) | reabertos: $(jq -r '.reabertos//0' _resp_semgrep.json) | auto_fechados: $(jq -r '.auto_fechados//0' _resp_semgrep.json)"
           else
             echo "⚠️ Semgrep ingest falhou com HTTP $HTTP (não bloqueia o pipeline)"
           fi
- 
+
       - name: Ingest Custom Review → Plataforma
         if: always()
         run: |
@@ -172,61 +166,21 @@ jobs:
             --slurpfile data custom-review.json \
             '{projeto_nome:$projeto,fonte:"custom",pipeline_run_id:$run_id,auto_close:true,data:$data[0]}' \
             > _payload_custom.json
- 
+
           HTTP=$(curl -s -o _resp_custom.json -w "%{http_code}" \
             -X POST "https://sauciness-ovary-clanking.ngrok-free.app/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891" \
             -H "ngrok-skip-browser-warning: true" \
             --data @_payload_custom.json)
- 
+
           echo "HTTP Status: $HTTP"
           cat _resp_custom.json
- 
+
           if [ "$HTTP" = "200" ]; then
             echo "✅ Custom OK — criados: $(jq -r '.criados//0' _resp_custom.json) | reabertos: $(jq -r '.reabertos//0' _resp_custom.json) | auto_fechados: $(jq -r '.auto_fechados//0' _resp_custom.json)"
           else
             echo "⚠️ Custom ingest falhou com HTTP $HTTP (não bloqueia o pipeline)"
-          fi
-
-      - name: Ingest Semgrep → Plataforma
-        if: always()
-        run: |
-          RESP=$(curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
-            -H "Content-Type: application/json" \
-            -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
-            -H "ngrok-skip-browser-warning: true" \
-            -d "{
-              \"projeto_nome\": \"${{ github.repository }}\",
-              \"fonte\": \"semgrep\",
-              \"pipeline_run_id\": \"${{ github.run_id }}\",
-              \"auto_close\": true,
-              \"data\": $(cat semgrep.json)
-            }")
-          if [ $? -eq 0 ]; then
-            echo "✅ Semgrep ingest OK — criados: $(echo $RESP | jq -r '.criados // 0') | reabertos: $(echo $RESP | jq -r '.reabertos // 0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados // 0')"
-          else
-            echo "⚠️ Semgrep ingest falhou (não bloqueia o pipeline)"
-          fi
-
-      - name: Ingest Custom Review → Plataforma
-        if: always()
-        run: |
-          RESP=$(curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
-            -H "Content-Type: application/json" \
-            -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
-            -H "ngrok-skip-browser-warning: true" \
-            -d "{
-              \"projeto_nome\": \"${{ github.repository }}\",
-              \"fonte\": \"custom\",
-              \"pipeline_run_id\": \"${{ github.run_id }}\",
-              \"auto_close\": true,
-              \"data\": $(cat custom-review.json)
-            }")
-          if [ $? -eq 0 ]; then
-            echo "✅ Custom ingest OK — criados: $(echo $RESP | jq -r '.criados // 0') | reabertos: $(echo $RESP | jq -r '.reabertos // 0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados // 0')"
-          else
-            echo "⚠️ Custom ingest falhou (não bloqueia o pipeline)"
           fi
 
       # ---------------- ARTEFATOS PARA O GATE ----------------
@@ -252,21 +206,19 @@ jobs:
           name: security-results
 
       - name: Enforce security policy via Plataforma
-        env:
-          NGROK_URL:   "https://sauciness-ovary-clanking.ngrok-free.app"
-          WEBHOOK_KEY: "acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891"
         run: |
           echo "## 🔒 Security Gate Report" >> "$GITHUB_STEP_SUMMARY"
           echo "**Pipeline:** \`${{ github.run_id }}\` | **Commit:** \`${{ github.sha }}\` | **Branch:** \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          GATE_RESPONSE=$(curl -sf \
-            -H "X-API-Key: $WEBHOOK_KEY" \
+          GATE_RESPONSE=$(curl -s \
+            -H "X-API-Key: acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891" \
             -H "ngrok-skip-browser-warning: true" \
-            "$NGROK_URL/api/gate-check/?projeto=${{ github.repository }}&fonte=trivy,semgrep,custom" \
-          ) || GATE_RESPONSE=""
+            "https://sauciness-ovary-clanking.ngrok-free.app/api/gate-check/?projeto=${{ github.repository }}&fonte=trivy,semgrep,custom") || GATE_RESPONSE=""
 
-          if [ -n "$GATE_RESPONSE" ]; then
+          echo "Gate response: $GATE_RESPONSE"
+
+          if [ -n "$GATE_RESPONSE" ] && echo "$GATE_RESPONSE" | jq -e '.gate_status' > /dev/null 2>&1; then
             BLOQUEANTES=$(echo "$GATE_RESPONSE" | jq -r '.bloqueantes // 0')
             CRITICAL=$(echo "$GATE_RESPONSE"    | jq -r '.critical // 0')
             HIGH=$(echo "$GATE_RESPONSE"        | jq -r '.high // 0')
@@ -280,29 +232,23 @@ jobs:
               echo "" >> "$GITHUB_STEP_SUMMARY"
               echo "| Sev. | CVE / Título | Componente | Versão atual | Versão corrige | Criado em | Última vez visto |" >> "$GITHUB_STEP_SUMMARY"
               echo "|:---:|---|---|:---:|:---:|:---:|:---:|" >> "$GITHUB_STEP_SUMMARY"
-
               echo "$GATE_RESPONSE" | jq -r '
                 .findings[]
-                | [
-                    (if .severidade=="CRITICAL" then "🔴 CRITICAL" else "🟠 HIGH" end),
-                    (.titulo // "N/A"),
-                    (.componente // "N/A"),
-                    (.versao_instalada // "N/A"),
-                    (if (.versao_corrige // "") != "" then .versao_corrige else "⚠️ sem fix" end),
-                    (.criado_em // "N/A"),
-                    (.atualizado_em // "N/A")
-                  ]
+                | [(if .severidade=="CRITICAL" then "🔴 CRITICAL" else "🟠 HIGH" end),
+                   (.titulo // "N/A"), (.componente // "N/A"),
+                   (.versao_instalada // "N/A"),
+                   (if (.versao_corrige // "") != "" then .versao_corrige else "⚠️ sem fix" end),
+                   (.criado_em // "N/A"), (.atualizado_em // "N/A")]
                 | "| " + join(" | ") + " |"
               ' >> "$GITHUB_STEP_SUMMARY"
-
               echo "" >> "$GITHUB_STEP_SUMMARY"
             fi
 
             echo "---" >> "$GITHUB_STEP_SUMMARY"
             echo "| Métrica | Valor |" >> "$GITHUB_STEP_SUMMARY"
             echo "|---|:---:|" >> "$GITHUB_STEP_SUMMARY"
-            echo "| 🔴 Critical bloqueantes | $CRITICAL |" >> "$GITHUB_STEP_SUMMARY"
-            echo "| 🟠 High bloqueantes | $HIGH |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| 🔴 Critical | $CRITICAL |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| 🟠 High | $HIGH |" >> "$GITHUB_STEP_SUMMARY"
             echo "| **Total bloqueantes** | **$BLOQUEANTES** |" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
 
@@ -327,7 +273,7 @@ jobs:
             TOTAL=$((TRIVY + SEMGREP + CUSTOM))
 
             if [ "$TRIVY" -gt 0 ]; then
-              echo "### 📦 SCA — Vulnerabilidades HIGH/CRITICAL (Trivy — fallback)" >> "$GITHUB_STEP_SUMMARY"
+              echo "### 📦 SCA — Trivy fallback" >> "$GITHUB_STEP_SUMMARY"
               echo "" >> "$GITHUB_STEP_SUMMARY"
               echo "| Severidade | CVE | Componente | Versão instalada | Versão que corrige |" >> "$GITHUB_STEP_SUMMARY"
               echo "|:---:|---|---|:---:|:---:|" >> "$GITHUB_STEP_SUMMARY"
