@@ -114,21 +114,67 @@ jobs:
       - name: Ingest Trivy → Plataforma
         if: always()
         run: |
+          jq -n \
+            --arg projeto "${{ github.repository }}" \
+            --arg run_id  "${{ github.run_id }}" \
+            --slurpfile data trivy.json \
+            '{projeto_nome:$projeto, fonte:"trivy", pipeline_run_id:$run_id, auto_close:true, data:$data[0]}' \
+            > _payload_trivy.json
+ 
           RESP=$(curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
             -H "ngrok-skip-browser-warning: true" \
-            -d "{
-              \"projeto_nome\": \"${{ github.repository }}\",
-              \"fonte\": \"trivy\",
-              \"pipeline_run_id\": \"${{ github.run_id }}\",
-              \"auto_close\": true,
-              \"data\": $(cat trivy.json)
-            }")
+            --data @_payload_trivy.json)
+ 
           if [ $? -eq 0 ]; then
-            echo "✅ Trivy ingest OK — criados: $(echo $RESP | jq -r '.criados // 0') | reabertos: $(echo $RESP | jq -r '.reabertos // 0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados // 0')"
+            echo "✅ Trivy OK — criados: $(echo $RESP | jq -r '.criados//0') | reabertos: $(echo $RESP | jq -r '.reabertos//0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados//0')"
           else
             echo "⚠️ Trivy ingest falhou (não bloqueia o pipeline)"
+          fi
+ 
+      - name: Ingest Semgrep → Plataforma
+        if: always()
+        run: |
+          jq -n \
+            --arg projeto "${{ github.repository }}" \
+            --arg run_id  "${{ github.run_id }}" \
+            --slurpfile data semgrep.json \
+            '{projeto_nome:$projeto, fonte:"semgrep", pipeline_run_id:$run_id, auto_close:true, data:$data[0]}' \
+            > _payload_semgrep.json
+ 
+          RESP=$(curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
+            -H "ngrok-skip-browser-warning: true" \
+            --data @_payload_semgrep.json)
+ 
+          if [ $? -eq 0 ]; then
+            echo "✅ Semgrep OK — criados: $(echo $RESP | jq -r '.criados//0') | reabertos: $(echo $RESP | jq -r '.reabertos//0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados//0')"
+          else
+            echo "⚠️ Semgrep ingest falhou (não bloqueia o pipeline)"
+          fi
+ 
+      - name: Ingest Custom Review → Plataforma
+        if: always()
+        run: |
+          jq -n \
+            --arg projeto "${{ github.repository }}" \
+            --arg run_id  "${{ github.run_id }}" \
+            --slurpfile data custom-review.json \
+            '{projeto_nome:$projeto, fonte:"custom", pipeline_run_id:$run_id, auto_close:true, data:$data[0]}' \
+            > _payload_custom.json
+ 
+          RESP=$(curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
+            -H "ngrok-skip-browser-warning: true" \
+            --data @_payload_custom.json)
+ 
+          if [ $? -eq 0 ]; then
+            echo "✅ Custom OK — criados: $(echo $RESP | jq -r '.criados//0') | reabertos: $(echo $RESP | jq -r '.reabertos//0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados//0')"
+          else
+            echo "⚠️ Custom ingest falhou (não bloqueia o pipeline)"
           fi
 
       - name: Ingest Semgrep → Plataforma
