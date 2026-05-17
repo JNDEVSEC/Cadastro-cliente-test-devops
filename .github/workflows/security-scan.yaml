@@ -10,10 +10,7 @@ permissions:
   contents: write
   security-events: write
 
-# ── Substitua os dois valores abaixo pela sua URL do ngrok ──────────
-# NGROK_URL   → a URL gerada pelo ngrok (sem barra no final)
-#               ex: https://sauciness-ovary-clanking.ngrok-free.app
-# WEBHOOK_KEY → o mesmo valor de WEBHOOK_API_KEY no seu settings.py
+# ── Atualize estes dois valores quando o ngrok reiniciar ─────────────
 env:
   NGROK_URL:   "https://sauciness-ovary-clanking.ngrok-free.app"
   WEBHOOK_KEY: "acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891"
@@ -85,7 +82,7 @@ jobs:
           path: relatorio_correcoes_nvd_*.json
           if-no-files-found: ignore
 
-      # ---------------- NVD SUMMARY (FORMATADO) ----------------
+      # ---------------- NVD SUMMARY ----------------
       - name: NVD Remediation Summary (Advisory)
         shell: bash
         run: |
@@ -112,49 +109,69 @@ jobs:
           fi
 
       # ---------------- ENVIA PARA A PLATAFORMA ----------------
+      # ngrok-skip-browser-warning: bypassa a página de aviso do ngrok gratuito
+
       - name: Ingest Trivy → Plataforma
         if: always()
         run: |
-          curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
+          RESP=$(curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
+            -H "ngrok-skip-browser-warning: true" \
             -d "{
               \"projeto_nome\": \"${{ github.repository }}\",
               \"fonte\": \"trivy\",
               \"pipeline_run_id\": \"${{ github.run_id }}\",
               \"auto_close\": true,
               \"data\": $(cat trivy.json)
-            }" || echo "⚠️ Plataforma ingest falhou (não bloqueia o pipeline)"
+            }")
+          if [ $? -eq 0 ]; then
+            echo "✅ Trivy ingest OK — criados: $(echo $RESP | jq -r '.criados // 0') | reabertos: $(echo $RESP | jq -r '.reabertos // 0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados // 0')"
+          else
+            echo "⚠️ Trivy ingest falhou (não bloqueia o pipeline)"
+          fi
 
       - name: Ingest Semgrep → Plataforma
         if: always()
         run: |
-          curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
+          RESP=$(curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
+            -H "ngrok-skip-browser-warning: true" \
             -d "{
               \"projeto_nome\": \"${{ github.repository }}\",
               \"fonte\": \"semgrep\",
               \"pipeline_run_id\": \"${{ github.run_id }}\",
               \"auto_close\": true,
               \"data\": $(cat semgrep.json)
-            }" || echo "⚠️ Plataforma ingest falhou (não bloqueia o pipeline)"
+            }")
+          if [ $? -eq 0 ]; then
+            echo "✅ Semgrep ingest OK — criados: $(echo $RESP | jq -r '.criados // 0') | reabertos: $(echo $RESP | jq -r '.reabertos // 0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados // 0')"
+          else
+            echo "⚠️ Semgrep ingest falhou (não bloqueia o pipeline)"
+          fi
 
       - name: Ingest Custom Review → Plataforma
         if: always()
         run: |
-          curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
+          RESP=$(curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
+            -H "ngrok-skip-browser-warning: true" \
             -d "{
               \"projeto_nome\": \"${{ github.repository }}\",
               \"fonte\": \"custom\",
               \"pipeline_run_id\": \"${{ github.run_id }}\",
               \"auto_close\": true,
               \"data\": $(cat custom-review.json)
-            }" || echo "⚠️ Plataforma ingest falhou (não bloqueia o pipeline)"
+            }")
+          if [ $? -eq 0 ]; then
+            echo "✅ Custom ingest OK — criados: $(echo $RESP | jq -r '.criados // 0') | reabertos: $(echo $RESP | jq -r '.reabertos // 0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados // 0')"
+          else
+            echo "⚠️ Custom ingest falhou (não bloqueia o pipeline)"
+          fi
 
-      # ---------------- ARTEFATOS PARA O GATE LOCAL ----------------
+      # ---------------- ARTEFATOS PARA O GATE ----------------
       - uses: actions/upload-artifact@v4
         with:
           name: security-results
@@ -182,10 +199,12 @@ jobs:
           WEBHOOK_KEY: "acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891"
         run: |
           echo "## 🔒 Security Gate Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Pipeline:** \`${{ github.run_id }}\` | **Commit:** \`${{ github.sha }}\` | **Branch:** \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           GATE_RESPONSE=$(curl -sf \
             -H "X-API-Key: $WEBHOOK_KEY" \
+            -H "ngrok-skip-browser-warning: true" \
             "$NGROK_URL/api/gate-check/?projeto=${{ github.repository }}&fonte=trivy,semgrep,custom" \
           ) || GATE_RESPONSE=""
 
@@ -201,8 +220,8 @@ jobs:
             if [ "$BLOQUEANTES" -gt 0 ]; then
               echo "### 📦 Vulnerabilidades bloqueantes (HIGH/CRITICAL abertos)" >> "$GITHUB_STEP_SUMMARY"
               echo "" >> "$GITHUB_STEP_SUMMARY"
-              echo "| Severidade | Título | Componente | Versão instalada | Versão que corrige |" >> "$GITHUB_STEP_SUMMARY"
-              echo "|:---:|---|---|:---:|:---:|" >> "$GITHUB_STEP_SUMMARY"
+              echo "| Sev. | CVE / Título | Componente | Versão atual | Versão corrige | Criado em | Última vez visto |" >> "$GITHUB_STEP_SUMMARY"
+              echo "|:---:|---|---|:---:|:---:|:---:|:---:|" >> "$GITHUB_STEP_SUMMARY"
 
               echo "$GATE_RESPONSE" | jq -r '
                 .findings[]
@@ -211,7 +230,9 @@ jobs:
                     (.titulo // "N/A"),
                     (.componente // "N/A"),
                     (.versao_instalada // "N/A"),
-                    (if (.versao_corrige // "") != "" then .versao_corrige else "⚠️ sem fix" end)
+                    (if (.versao_corrige // "") != "" then .versao_corrige else "⚠️ sem fix" end),
+                    (.criado_em // "N/A"),
+                    (.atualizado_em // "N/A")
                   ]
                 | "| " + join(" | ") + " |"
               ' >> "$GITHUB_STEP_SUMMARY"
