@@ -111,26 +111,30 @@ jobs:
       # ---------------- ENVIA PARA A PLATAFORMA ----------------
       # ngrok-skip-browser-warning: bypassa a página de aviso do ngrok gratuito
 
-      - name: Ingest Trivy → Plataforma
+       - name: Ingest Trivy → Plataforma
         if: always()
         run: |
           jq -n \
             --arg projeto "${{ github.repository }}" \
             --arg run_id  "${{ github.run_id }}" \
             --slurpfile data trivy.json \
-            '{projeto_nome:$projeto, fonte:"trivy", pipeline_run_id:$run_id, auto_close:true, data:$data[0]}' \
+            '{projeto_nome:$projeto,fonte:"trivy",pipeline_run_id:$run_id,auto_close:true,data:$data[0]}' \
             > _payload_trivy.json
  
-          RESP=$(curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
+          HTTP=$(curl -s -o _resp_trivy.json -w "%{http_code}" \
+            -X POST "https://sauciness-ovary-clanking.ngrok-free.app/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
-            -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
+            -H "X-API-Key: acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891" \
             -H "ngrok-skip-browser-warning: true" \
             --data @_payload_trivy.json)
  
-          if [ $? -eq 0 ]; then
-            echo "✅ Trivy OK — criados: $(echo $RESP | jq -r '.criados//0') | reabertos: $(echo $RESP | jq -r '.reabertos//0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados//0')"
+          echo "HTTP Status: $HTTP"
+          cat _resp_trivy.json
+ 
+          if [ "$HTTP" = "200" ]; then
+            echo "✅ Trivy OK — criados: $(jq -r '.criados//0' _resp_trivy.json) | reabertos: $(jq -r '.reabertos//0' _resp_trivy.json) | auto_fechados: $(jq -r '.auto_fechados//0' _resp_trivy.json)"
           else
-            echo "⚠️ Trivy ingest falhou (não bloqueia o pipeline)"
+            echo "⚠️ Trivy ingest falhou com HTTP $HTTP (não bloqueia o pipeline)"
           fi
  
       - name: Ingest Semgrep → Plataforma
@@ -140,19 +144,23 @@ jobs:
             --arg projeto "${{ github.repository }}" \
             --arg run_id  "${{ github.run_id }}" \
             --slurpfile data semgrep.json \
-            '{projeto_nome:$projeto, fonte:"semgrep", pipeline_run_id:$run_id, auto_close:true, data:$data[0]}' \
+            '{projeto_nome:$projeto,fonte:"semgrep",pipeline_run_id:$run_id,auto_close:true,data:$data[0]}' \
             > _payload_semgrep.json
  
-          RESP=$(curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
+          HTTP=$(curl -s -o _resp_semgrep.json -w "%{http_code}" \
+            -X POST "https://sauciness-ovary-clanking.ngrok-free.app/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
-            -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
+            -H "X-API-Key: acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891" \
             -H "ngrok-skip-browser-warning: true" \
             --data @_payload_semgrep.json)
  
-          if [ $? -eq 0 ]; then
-            echo "✅ Semgrep OK — criados: $(echo $RESP | jq -r '.criados//0') | reabertos: $(echo $RESP | jq -r '.reabertos//0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados//0')"
+          echo "HTTP Status: $HTTP"
+          cat _resp_semgrep.json
+ 
+          if [ "$HTTP" = "200" ]; then
+            echo "✅ Semgrep OK — criados: $(jq -r '.criados//0' _resp_semgrep.json) | reabertos: $(jq -r '.reabertos//0' _resp_semgrep.json) | auto_fechados: $(jq -r '.auto_fechados//0' _resp_semgrep.json)"
           else
-            echo "⚠️ Semgrep ingest falhou (não bloqueia o pipeline)"
+            echo "⚠️ Semgrep ingest falhou com HTTP $HTTP (não bloqueia o pipeline)"
           fi
  
       - name: Ingest Custom Review → Plataforma
@@ -162,19 +170,23 @@ jobs:
             --arg projeto "${{ github.repository }}" \
             --arg run_id  "${{ github.run_id }}" \
             --slurpfile data custom-review.json \
-            '{projeto_nome:$projeto, fonte:"custom", pipeline_run_id:$run_id, auto_close:true, data:$data[0]}' \
+            '{projeto_nome:$projeto,fonte:"custom",pipeline_run_id:$run_id,auto_close:true,data:$data[0]}' \
             > _payload_custom.json
  
-          RESP=$(curl -sf -X POST "${{ env.NGROK_URL }}/api/webhook/ingest/" \
+          HTTP=$(curl -s -o _resp_custom.json -w "%{http_code}" \
+            -X POST "https://sauciness-ovary-clanking.ngrok-free.app/api/webhook/ingest/" \
             -H "Content-Type: application/json" \
-            -H "X-API-Key: ${{ env.WEBHOOK_KEY }}" \
+            -H "X-API-Key: acc6d4051fb7fd2f731a6a3283bb5b108fec5a3180c4606764b8cc358f93273902ebaf93e6de0290b9f6d1ffeba42c65a3f4d52570cf0e20988250a1ded64891" \
             -H "ngrok-skip-browser-warning: true" \
             --data @_payload_custom.json)
  
-          if [ $? -eq 0 ]; then
-            echo "✅ Custom OK — criados: $(echo $RESP | jq -r '.criados//0') | reabertos: $(echo $RESP | jq -r '.reabertos//0') | auto_fechados: $(echo $RESP | jq -r '.auto_fechados//0')"
+          echo "HTTP Status: $HTTP"
+          cat _resp_custom.json
+ 
+          if [ "$HTTP" = "200" ]; then
+            echo "✅ Custom OK — criados: $(jq -r '.criados//0' _resp_custom.json) | reabertos: $(jq -r '.reabertos//0' _resp_custom.json) | auto_fechados: $(jq -r '.auto_fechados//0' _resp_custom.json)"
           else
-            echo "⚠️ Custom ingest falhou (não bloqueia o pipeline)"
+            echo "⚠️ Custom ingest falhou com HTTP $HTTP (não bloqueia o pipeline)"
           fi
 
       - name: Ingest Semgrep → Plataforma
