@@ -1,488 +1,566 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+security_review.py — Mini Pentest Estático
+Saída compatível com a Plataforma de Vulnerabilidades (fonte: custom)
+
+Uso:
+  python security_review.py --root . --json-out custom-review.json --sarif-out custom-review.sarif
+"""
 
 import argparse
 import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
 from typing import Dict, List, Iterable
 
-# -----------------------
-# Configuração principal
-# -----------------------
-DEFAULT_EXTS = [".py", ".js", ".php", ".java", ".ts", ".jsx", ".tsx"]
-SKIP_DIRS = {
-    ".git", ".hg", ".svn", ".tox", ".mypy_cache", ".pytest_cache",
-    "node_modules", "dist", "build", "out", ".venv", "venv", "__pycache__",
-    ".next", ".nuxt", ".yarn", ".pnpm-store", "coverage"
+# ──────────────────────────────────────────────
+# CONFIG
+# ──────────────────────────────────────────────
+DEFAULT_EXTS = [".py", ".js", ".ts", ".jsx", ".tsx", ".php",
+                ".java", ".go", ".rb", ".cs", ".env", ".yml", ".yaml",
+                ".xml", ".tf", ".sh", ".bash"]
+_SKIP_DIRS_DEFAULT = {
+    ".git",".hg",".svn",".tox",".mypy_cache",".pytest_cache",
+    "node_modules","dist","build","out",".venv","venv","__pycache__",
+    ".next",".nuxt",".yarn",".pnpm-store","coverage","vendor",
+    "migrations","staticfiles",".terraform"
 }
-MAX_BYTES = 1_000_000  # 1 MB por arquivo
+MAX_BYTES = 1_000_000
+SEV_ORDER = ["INFO","LOW","MEDIUM","HIGH","CRITICAL"]
 
-# Severidade -> nível SARIF
 SEV_TO_SARIF = {
-    "CRITICAL": "error",
-    "HIGH": "error",
-    "MEDIUM": "warning",
-    "LOW": "note",
-    "INFO": "note",
+    "CRITICAL":"error","HIGH":"error","MEDIUM":"warning",
+    "LOW":"note","INFO":"note",
 }
 
-# Severidades ordenadas para gate
-SEV_ORDER = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
-def sev_gte(a: str, b: str) -> bool:
-    return SEV_ORDER.index(a) >= SEV_ORDER.index(b)
+_SKIP_DIRS = _SKIP_DIRS_DEFAULT.copy()
 
-# -----------------------
-# Regras (ID, nome, regex, severidade)
-# -----------------------
+# ──────────────────────────────────────────────
+# REGRAS
+# Campos: id, name, re, sev, description, fix, cwe
+# ──────────────────────────────────────────────
 RULES = [
-    # Exposição/segredos
-    {"id": "SRV-001", "name": "hardcoded api key",
-     "re": r"(api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*['\"][A-Za-z0-9_\-]{16,}['\"]", "sev": "CRITICAL"},
-    {"id": "SRV-002", "name": "hardcoded certificado/chave privada",
-     "re": r"(BEGIN CERTIFICATE|BEGIN RSA PRIVATE KEY|BEGIN PRIVATE KEY)", "sev": "CRITICAL"},
-    {"id": "SRV-003", "name": "atribuição de chave/segredo sensível",
-     "re": r"\b(SECRET_KEY|API_KEY|TOKEN|PASSWORD|DB_PASS|ACCESS_KEY)\b\s*=\s*['\"][^'\"]{4,}['\"]", "sev": "HIGH"},
-    {"id": "SRV-004", "name": "variável sensível vazia/nula",
-     "re": r"\b(SECRET_KEY|API_KEY|TOKEN|PASSWORD|DB_PASS|ACCESS_KEY)\b\s*=\s*([\"']{2}|null)", "sev": "MEDIUM"},
 
-    # Autenticação/autorização
-    {"id": "SRV-010", "name": "redirect aberto",
-     "re": r"redirect\((request\.GET|url)\)", "sev": "HIGH"},
-    {"id": "SRV-011", "name": "uso direto de parâmetro de request",
-     "re": r"(request\.GET|request\.POST|\$_GET|\$_POST)", "sev": "LOW"},
+    # ── A01: Broken Access Control ──────────────────
+    {
+        "id":"AC-001","sev":"HIGH",
+        "name":"Rota sem autenticação (heurístico)",
+        "re": r"@(app|bp|router)\.(get|post|put|delete|patch)\s*\(",
+        "description":"Endpoint HTTP definido sem decorator de autenticação visível nas 5 linhas anteriores.",
+        "fix":"Adicione @login_required / @jwt_required / @auth.login_required antes da função.",
+        "cwe":["CWE-306"],
+    },
+    {
+        "id":"AC-002","sev":"HIGH",
+        "name":"IDOR — acesso direto por ID do usuário",
+        "re": r"(User\.get|get_object_or_404|Model\.find)\s*\(\s*(id|pk)\s*=\s*(request|req)\.",
+        "description":"Objeto buscado diretamente por ID vindo da requisição sem verificação de ownership.",
+        "fix":"Verifique se o objeto pertence ao usuário autenticado antes de retorná-lo.",
+        "cwe":["CWE-639"],
+    },
+    {
+        "id":"AC-003","sev":"MEDIUM",
+        "name":"Bypass de is_admin/is_staff em query params",
+        "re": r"(is_admin|is_staff|role|cargo)\s*=\s*(request\.(GET|POST|data|json|args|form))",
+        "description":"Flag de privilégio controlada pelo cliente via parâmetros da requisição.",
+        "fix":"Nunca aceite flags de privilégio do cliente; use a sessão/token do backend.",
+        "cwe":["CWE-269"],
+    },
 
-    # Criptografia/algoritmos
-    {"id": "SRV-020", "name": "uso de algoritmo hash inseguro",
-     "re": r"\b(md5|sha1|rot13|crc32)\b\s*\(", "sev": "HIGH"},
-    {"id": "SRV-021", "name": "base64 usado como 'criptografia'",
-     "re": r"\bbase64\b\s*\(", "sev": "MEDIUM"},
-    {"id": "SRV-022", "name": "pseudocriptografia por fórmula",
-     "re": r"\b(pass|key|token|secret)\b\s*=\s*\w+\s*[\+\-\*/\^%]\s*\w+", "sev": "MEDIUM"},
+    # ── A02: Cryptographic Failures ─────────────────
+    {
+        "id":"CR-001","sev":"CRITICAL",
+        "name":"Chave/segredo hardcoded",
+        "re": r"(api[_-]?key|secret[_-]?key|access[_-]?token|password|passwd|pwd)\s*[:=]\s*['\"][A-Za-z0-9@#$%^&*_\-\.]{8,}['\"]",
+        "description":"Credencial ou chave secreta embutida diretamente no código-fonte.",
+        "fix":"Use variáveis de ambiente ou secret manager; rotacione a chave imediatamente.",
+        "cwe":["CWE-798","CWE-259"],
+    },
+    {
+        "id":"CR-002","sev":"CRITICAL",
+        "name":"Chave privada/certificado no código",
+        "re": r"(BEGIN (RSA |EC |DSA )?PRIVATE KEY|BEGIN CERTIFICATE|PRIVATE KEY-----)",
+        "description":"Material criptográfico privado versionado no repositório.",
+        "fix":"Revogar imediatamente; mover para vault/KMS; nunca versionar.",
+        "cwe":["CWE-321"],
+    },
+    {
+        "id":"CR-003","sev":"HIGH",
+        "name":"Algoritmo hash inseguro (MD5/SHA1)",
+        "re": r"\b(hashlib\.md5|hashlib\.sha1|md5\s*\(|sha1\s*\(|DigestUtils\.md5|MessageDigest\.getInstance\s*\(\s*[\"']MD5|[\"']SHA-1[\"'])\b",
+        "description":"MD5 e SHA-1 são criptograficamente quebrados e vulneráveis a colisão.",
+        "fix":"Use SHA-256/512 para integridade; bcrypt/Argon2/PBKDF2 para senhas.",
+        "cwe":["CWE-327","CWE-328"],
+    },
+    {
+        "id":"CR-004","sev":"HIGH",
+        "name":"Verificação TLS desabilitada",
+        "re": r"(verify\s*=\s*False|ssl\.CERT_NONE|checkCertificate\s*=\s*false|InsecureRequestWarning|urllib3\.disable_warnings)",
+        "description":"Certificado TLS não é validado; vulnerável a MITM.",
+        "fix":"Remova verify=False; use certificados válidos; implemente certificate pinning se necessário.",
+        "cwe":["CWE-295"],
+    },
+    {
+        "id":"CR-005","sev":"HIGH",
+        "name":"Base64 usado como criptografia",
+        "re": r"(base64\.(b64encode|b64decode|encodebytes))\s*\(",
+        "description":"Base64 é codificação, não criptografia. Dados são trivialmente reversíveis.",
+        "fix":"Use criptografia autenticada (AES-GCM, ChaCha20-Poly1305) para dados sensíveis.",
+        "cwe":["CWE-327"],
+    },
+    {
+        "id":"CR-006","sev":"MEDIUM",
+        "name":"Gerador de número aleatório inseguro",
+        "re": r"\b(random\.random|random\.randint|Math\.random|rand\(\)|srand\()\b",
+        "description":"Geradores pseudo-aleatórios não criptográficos são previsíveis.",
+        "fix":"Use secrets.token_bytes / secrets.token_hex (Python) ou crypto.getRandomValues() (JS).",
+        "cwe":["CWE-338"],
+    },
 
-    # Injeções / Execução
-    {"id": "SRV-030", "name": "SQL injection (heurístico)",
-     "re": r"SELECT\s+\*\s+FROM\s+\w+\s+WHERE\s+\w+\s*=\s*(['\"]?\s*\.\s*\$?\w+\s*\.\s*['\"]?|['\"]\s*\$?\w+\s*['\"])", "sev": "HIGH"},
-    {"id": "SRV-031", "name": "uso de eval/exec/new Function",
-     "re": r"\b(eval|exec|Function)\s*\(", "sev": "HIGH"},
-    {"id": "SRV-032", "name": "execução de comando do SO",
-     "re": r"(os\.system|subprocess\.Popen|Runtime\.getRuntime\(\)\.exec)", "sev": "HIGH"},
-    {"id": "SRV-033", "name": "comando concatenado (injeção possível)",
-     "re": r"(exec\s*\(\s*\".*\"\s*\+\s*\w+)", "sev": "MEDIUM"},
+    # ── A03: Injection ───────────────────────────────
+    {
+        "id":"INJ-001","sev":"CRITICAL",
+        "name":"SQL Injection por concatenação",
+        "re": r"(execute|query|raw|cursor\.execute)\s*\(\s*[\"']?\s*SELECT|INSERT|UPDATE|DELETE.*[\"']?\s*\+|%\s*\w+|\.format\s*\(|f[\"'].*SELECT",
+        "description":"Query SQL construída por concatenação ou f-string com dados do usuário.",
+        "fix":"Use queries parametrizadas (?/%s) ou ORM com métodos seguros. Nunca concatene entrada do usuário.",
+        "cwe":["CWE-89"],
+    },
+    {
+        "id":"INJ-002","sev":"HIGH",
+        "name":"Command Injection",
+        "re": r"(os\.system\s*\(|subprocess\.(call|run|Popen)\s*\(.*shell\s*=\s*True|Runtime\.getRuntime\(\)\.exec|exec\s*\(|popen\s*\()",
+        "description":"Execução de comando de sistema com possível entrada do usuário.",
+        "fix":"Nunca use shell=True; passe argumentos como lista; valide e sanitize entradas.",
+        "cwe":["CWE-78"],
+    },
+    {
+        "id":"INJ-003","sev":"HIGH",
+        "name":"Code Injection (eval/exec)",
+        "re": r"\b(eval|exec|compile)\s*\(\s*(request|req|user_input|\$_|input)",
+        "description":"Execução dinâmica de código com entrada controlada pelo usuário.",
+        "fix":"Elimine eval/exec; use mapeamentos de funções ou AST para parsing seguro.",
+        "cwe":["CWE-94"],
+    },
+    {
+        "id":"INJ-004","sev":"HIGH",
+        "name":"SSTI — Server-Side Template Injection",
+        "re": r"(render_template_string\s*\(|Template\s*\(\s*(request|user|f[\"'])|Jinja2\.from_string\s*\(.*\+)",
+        "description":"Template renderizado com dados do usuário sem escape; pode levar a RCE.",
+        "fix":"Nunca passe entrada do usuário em render_template_string; use templates estáticos.",
+        "cwe":["CWE-94"],
+    },
+    {
+        "id":"INJ-005","sev":"HIGH",
+        "name":"SSRF — Server-Side Request Forgery",
+        "re": r"(requests\.(get|post|put)\s*\(\s*(request\.|req\.|url\s*=\s*(request|req))|urllib\.request\.urlopen\s*\(\s*(request|req)|fetch\s*\(\s*req\.(body|query|params))",
+        "description":"URL da requisição controlada pelo cliente; pode aceder serviços internos.",
+        "fix":"Valide e allowlist URLs; bloqueie IPs privados (169.254.x, 10.x, 192.168.x); use proxy de egress.",
+        "cwe":["CWE-918"],
+    },
+    {
+        "id":"INJ-006","sev":"HIGH",
+        "name":"NoSQL Injection (MongoDB/Mongoose)",
+        "re": r"(find\s*\(\s*\{.*\$where|\$regex.*req\.|collection\.(find|findOne)\s*\(.*req\.(body|query|params))",
+        "description":"Query NoSQL com operadores controlados pelo cliente.",
+        "fix":"Valide e sanitize entradas; use esquemas estrito (Mongoose); bloqueie operadores $.",
+        "cwe":["CWE-943"],
+    },
+    {
+        "id":"INJ-007","sev":"HIGH",
+        "name":"XSS — Sink perigoso",
+        "re": r"(document\.write\s*\(|innerHTML\s*=|outerHTML\s*=|insertAdjacentHTML|dangerouslySetInnerHTML|\beval\s*\(\s*(location|document))",
+        "description":"Dados inseridos diretamente no DOM sem sanitização; permite XSS.",
+        "fix":"Use textContent em vez de innerHTML; sanitize com DOMPurify; implemente CSP.",
+        "cwe":["CWE-79"],
+    },
+    {
+        "id":"INJ-008","sev":"MEDIUM",
+        "name":"Log Injection",
+        "re": r"(logging\.(info|warning|error|debug|critical)|console\.(log|warn|error))\s*\(.*\+.*(request|req)\.",
+        "description":"Dados do usuário inseridos em logs sem sanitização; pode forjar entradas de log.",
+        "fix":"Sanitize dados antes de logar; use structured logging; escape newlines (\\n, \\r).",
+        "cwe":["CWE-117"],
+    },
+    {
+        "id":"INJ-009","sev":"HIGH",
+        "name":"XXE — XML External Entity",
+        "re": r"(etree\.(parse|fromstring)|XMLParser\s*\(|DocumentBuilder|SAXParser|lxml\.etree)(?!.*resolve_entities\s*=\s*False)",
+        "description":"Parser XML pode processar entidades externas (XXE) se não configurado com segurança.",
+        "fix":"Desabilite DTD/external entities: etree.XMLParser(resolve_entities=False, no_network=True).",
+        "cwe":["CWE-611"],
+    },
+    {
+        "id":"INJ-010","sev":"HIGH",
+        "name":"Desserialização insegura",
+        "re": r"\b(pickle\.(loads|load)|yaml\.load\s*\((?!.*Loader=yaml\.SafeLoader)|marshal\.loads|jsonpickle\.decode|unserialize\s*\()",
+        "description":"Desserialização de dados não confiáveis pode causar RCE.",
+        "fix":"Use yaml.safe_load(); evite pickle com dados externos; use JSON com schema validation.",
+        "cwe":["CWE-502"],
+    },
 
-    # Entrada/arquivos/rede
-    {"id": "SRV-040", "name": "leitura de arquivo sem validação (path traversal)",
-     "re": r"(open\s*\(|fs\.readFile\s*\(|FileReader\s*\()", "sev": "LOW"},
-    {"id": "SRV-041", "name": "upload sem restrição",
-     "re": r"(move_uploaded_file|file\.upload|req\.files)", "sev": "HIGH"},
-    {"id": "SRV-042", "name": "listagem de diretório",
-     "re": r"(os\.listdir|readdir\s*\(|\bdir\s*\()", "sev": "LOW"},
+    # ── A04: Insecure Design ─────────────────────────
+    {
+        "id":"DES-001","sev":"HIGH",
+        "name":"Upload de arquivo sem restrição",
+        "re": r"(move_uploaded_file|request\.files|multer\(\)|file\.upload|@RequestParam.*MultipartFile)",
+        "description":"Upload de arquivo sem validação de tipo ou tamanho.",
+        "fix":"Valide MIME/extensão; limite tamanho; armazene fora do webroot; renomeie aleatoriamente.",
+        "cwe":["CWE-434"],
+    },
+    {
+        "id":"DES-002","sev":"HIGH",
+        "name":"Redirect aberto",
+        "re": r"(redirect\s*\(\s*(request\.(GET|POST|args|query)|req\.(query|body))|HttpResponseRedirect\s*\(\s*request\.GET)",
+        "description":"URL de redirecionamento controlada pelo usuário; facilita phishing.",
+        "fix":"Use allowlist de domínios para redirect; não aceite URLs completas do usuário.",
+        "cwe":["CWE-601"],
+    },
+    {
+        "id":"DES-003","sev":"MEDIUM",
+        "name":"Mass assignment / Over-posting",
+        "re": r"(Model\(\*\*request\.(POST|data|json|form)|\.create\s*\(\s*\*\*request\.|update\s*\(\s*\*\*request\.)",
+        "description":"Todos os campos do payload do cliente atribuídos diretamente ao modelo.",
+        "fix":"Use serializers com campos explícitos (fields); nunca use **request.data direto.",
+        "cwe":["CWE-915"],
+    },
 
-    # HTTP/Headers/Sessão
-    {"id": "SRV-050", "name": "cookie de sessão sem Secure",
-     "re": r"session\.cookie_secure\s*=\s*False", "sev": "HIGH"},
-    {"id": "SRV-051", "name": "headers de segurança ausentes (menção)",
-     "re": r"(X-Frame-Options|Content-Security-Policy)", "sev": "INFO"},
-    {"id": "SRV-052", "name": "verificação de TLS desativada",
-     "re": r"(verify\s*=\s*False|ssl\.verify\s*=\s*False)", "sev": "HIGH"},
+    # ── A05: Security Misconfiguration ──────────────
+    {
+        "id":"CFG-001","sev":"HIGH",
+        "name":"DEBUG=True em produção",
+        "re": r"\bDEBUG\s*=\s*True\b",
+        "description":"Modo debug expõe stack traces, configurações e dados internos.",
+        "fix":"Defina DEBUG=False em produção; use variável de ambiente.",
+        "cwe":["CWE-215"],
+    },
+    {
+        "id":"CFG-002","sev":"HIGH",
+        "name":"CORS permissivo (wildcard)",
+        "re": r"(CORS_ALLOW_ALL_ORIGINS\s*=\s*True|Access-Control-Allow-Origin.*\*|cors\(\{.*origin\s*:\s*['\*]|cors_allowed_origins\s*=\s*\[?\s*[\"']\*)",
+        "description":"Qualquer origem pode fazer requisições cross-origin autenticadas.",
+        "fix":"Liste origens explícitas; nunca use * com allow_credentials=True.",
+        "cwe":["CWE-346"],
+    },
+    {
+        "id":"CFG-003","sev":"HIGH",
+        "name":"Cookie sem Secure/HttpOnly",
+        "re": r"(SESSION_COOKIE_SECURE\s*=\s*False|SESSION_COOKIE_HTTPONLY\s*=\s*False|set_cookie\s*\((?!.*secure)|res\.cookie\s*\((?!.*httpOnly))",
+        "description":"Cookie de sessão sem flags Secure/HttpOnly é vulnerável a roubo.",
+        "fix":"Defina Secure=True, HttpOnly=True, SameSite=Strict/Lax.",
+        "cwe":["CWE-614","CWE-1004"],
+    },
+    {
+        "id":"CFG-004","sev":"MEDIUM",
+        "name":"ALLOWED_HOSTS aberto (*)",
+        "re": r"ALLOWED_HOSTS\s*=\s*\[?\s*['\"]?\*['\"]?\s*\]?",
+        "description":"Qualquer host é aceito; facilita host header injection.",
+        "fix":"Liste explicitamente os hosts permitidos.",
+        "cwe":["CWE-183"],
+    },
+    {
+        "id":"CFG-005","sev":"MEDIUM",
+        "name":"CSRF desabilitado",
+        "re": r"(csrf_exempt|@csrf_exempt|csrfmiddlewaretoken.*disabled|CSRF_COOKIE_SECURE\s*=\s*False|disableCSRF)",
+        "description":"Proteção CSRF desabilitada; permite requisições forjadas de outros sites.",
+        "fix":"Use @csrf_exempt apenas em endpoints de webhook com assinatura própria; documente a decisão.",
+        "cwe":["CWE-352"],
+    },
+    {
+        "id":"CFG-006","sev":"LOW",
+        "name":"Porta de admin/debug exposta na configuração",
+        "re": r"(0\.0\.0\.0:\d{4}|host\s*=\s*['\"]0\.0\.0\.0['\"]|BIND.*0\.0\.0\.0)",
+        "description":"Serviço vinculado a todas as interfaces de rede.",
+        "fix":"Vincule a 127.0.0.1 em desenvolvimento; use firewall/VPC em produção.",
+        "cwe":["CWE-200"],
+    },
 
-    # XSS (corrigido: detectar <script> e também &lt;script&gt;)
-    {"id": "SRV-060", "name": "XSS (sink perigoso em HTML/JS)",
-     "re": r"(document\.write|innerHTML\s*=|<script>|&lt;script&gt;|onerror\s*=|onload\s*=|dangerouslySetInnerHTML)", "sev": "HIGH"},
+    # ── A06: Vulnerable Components ───────────────────
+    {
+        "id":"DEP-001","sev":"MEDIUM",
+        "name":"Versão de dependência sem pin (>=)",
+        "re": r"^[a-zA-Z0-9_\-]+\s*>=\s*\d",
+        "description":"Dependência com restrição aberta pode instalar versão vulnerável no futuro.",
+        "fix":"Use versões pinadas (==x.y.z) ou faixas fechadas (>=x.y,<x+1).",
+        "cwe":["CWE-1395"],
+    },
 
-    # Qualidade/Práticas
-    {"id": "SRV-070", "name": "tratamento genérico de exceção",
-    "re": r"(except\s+Exception\b|catch\s*\(Exception\b)", "sev": "LOW"},
-    {"id": "SRV-071", "name": "debug/log verboso em produção",
-     "re": r"(debug\s*=\s*True|console\.log|print\s*\()", "sev": "LOW"},
-    {"id": "SRV-072", "name": "segredo/senha em comentários",
-     "re": r"(#.*senha|//.*password|/\*.*secret)", "sev": "LOW"},
+    # ── A07: Auth Failures ───────────────────────────
+    {
+        "id":"AU-001","sev":"HIGH",
+        "name":"JWT sem verificação de assinatura",
+        "re": r"(jwt\.decode\s*\((?!.*algorithms|.*verify\s*=\s*True)|verify\s*=\s*False.*jwt|options\s*=\s*\{[\"']verify_signature[\"']\s*:\s*False)",
+        "description":"Token JWT aceito sem verificar a assinatura; forjável por qualquer pessoa.",
+        "fix":"Sempre passe algorithms=['HS256'] (ou RS256); nunca use verify=False.",
+        "cwe":["CWE-347"],
+    },
+    {
+        "id":"AU-002","sev":"HIGH",
+        "name":"Senha armazenada em plaintext",
+        "re": r"(password\s*=\s*['\"][^'\"]{4,}['\"]|SET password\s*=\s*['\"]|INSERT.*password.*VALUES\s*\(|db\.execute.*password.*[+%])",
+        "description":"Senha armazenada ou transmitida sem hash.",
+        "fix":"Use bcrypt/Argon2/PBKDF2; nunca armazene senha em plaintext ou MD5.",
+        "cwe":["CWE-256","CWE-916"],
+    },
+    {
+        "id":"AU-003","sev":"MEDIUM",
+        "name":"Token/sessão em URL (query string)",
+        "re": r"(token|session|access_token|api_key)\s*=\s*(request\.GET|req\.query|\$_GET)",
+        "description":"Credencial transmitida na URL; aparece em logs, referrers e histórico.",
+        "fix":"Use headers Authorization: Bearer <token>; nunca passe tokens em query string.",
+        "cwe":["CWE-598"],
+    },
 
-    # Caminhos sensíveis (menção)
-    {"id": "SRV-080", "name": "paths sensíveis/administrativos mencionados",
-     "re": r"(/admin|/config|/backup|/private|/usuario(s)?|/cliente(s)?|/produto(s)?|/pedidos?|/ordem(s)?|/comiss(o|õ)es?|/acesso|/painel|/controllers|/css|/dist|/img(s)?|/plugins)", "sev": "INFO"},
+    # ── A08: Software/Data Integrity ─────────────────
+    {
+        "id":"INT-001","sev":"HIGH",
+        "name":"Desserialização YAML insegura",
+        "re": r"yaml\.load\s*\((?!.*Loader\s*=\s*yaml\.(SafeLoader|BaseLoader))",
+        "description":"yaml.load() sem SafeLoader pode executar código arbitrário.",
+        "fix":"Use yaml.safe_load() ou yaml.load(data, Loader=yaml.SafeLoader).",
+        "cwe":["CWE-502"],
+    },
+    {
+        "id":"INT-002","sev":"HIGH",
+        "name":"Uso de pickle com dados externos",
+        "re": r"pickle\.(loads|load)\s*\(",
+        "description":"pickle pode executar código arbitrário ao desserializar dados não confiáveis.",
+        "fix":"Nunca desserialize pickle de dados externos; use JSON com schema validation.",
+        "cwe":["CWE-502"],
+    },
+
+    # ── A09: Logging ─────────────────────────────────
+    {
+        "id":"LOG-001","sev":"LOW",
+        "name":"Dado sensível em log",
+        "re": r"(log\.(info|debug|warning|error)|print\s*\(|console\.log)\s*\(.*\b(password|token|secret|credit_card|ssn|cpf|api_key)\b",
+        "description":"Possível dado sensível sendo gravado em log.",
+        "fix":"Mascare campos sensíveis; use logger estruturado com filtros de PII.",
+        "cwe":["CWE-532"],
+    },
+    {
+        "id":"LOG-002","sev":"LOW",
+        "name":"Stack trace exposto ao usuário",
+        "re": r"(traceback\.print_exc|e\.printStackTrace\(\)|res\.(send|json)\s*\(\s*err\b|res\.send\s*\(\s*error\b)",
+        "description":"Stack trace da exceção enviado diretamente ao cliente.",
+        "fix":"Log interno do erro; retorne mensagem genérica ao cliente.",
+        "cwe":["CWE-209"],
+    },
+
+    # ── A10: SSRF / Path Traversal ───────────────────
+    {
+        "id":"PT-001","sev":"HIGH",
+        "name":"Path Traversal — caminho do usuário sem validação",
+        "re": r"(open\s*\(\s*(request|req|user|os\.path\.join\s*\(.*request)|send_file\s*\(\s*(request|req)|readFile\s*\(\s*(req|request))",
+        "description":"Caminho de arquivo montado com input do usuário; permite ../../../etc/passwd.",
+        "fix":"Use os.path.realpath() + verifique prefixo; use allowlist de caminhos permitidos.",
+        "cwe":["CWE-22"],
+    },
+
+    # ── Infrastructure as Code ───────────────────────
+    {
+        "id":"IAC-001","sev":"HIGH",
+        "name":"Bucket S3/storage público",
+        "re": r"(acl\s*=\s*[\"']public-read|PublicAccessBlockConfiguration.*false|\"public-read-write\")",
+        "description":"Bucket de armazenamento configurado como público.",
+        "fix":"Defina ACL private; habilite Block Public Access; use presigned URLs.",
+        "cwe":["CWE-732"],
+    },
+    {
+        "id":"IAC-002","sev":"HIGH",
+        "name":"Security group aberto (0.0.0.0/0)",
+        "re": r"(cidr_blocks\s*=\s*\[?\s*[\"']0\.0\.0\.0/0[\"']|from_port\s*=\s*0.*to_port\s*=\s*0|ingress.*0\.0\.0\.0/0)",
+        "description":"Regra de firewall abre todas as portas para qualquer IP.",
+        "fix":"Restrinja CIDRs ao mínimo necessário; use security groups específicos por serviço.",
+        "cwe":["CWE-732"],
+    },
+
+    # ── Qualidade/Práticas ────────────────────────────
+    {
+        "id":"QA-001","sev":"LOW",
+        "name":"Tratamento genérico de exceção",
+        "re": r"(except\s+Exception\b|except\s*:\s*$|catch\s*\(\s*Exception\s+[a-z]|catch\s*\(e\)\s*\{\s*\})",
+        "description":"Exceção capturada genericamente; oculta erros e dificulta depuração.",
+        "fix":"Capture tipos específicos; logue adequadamente; falhe de forma segura.",
+        "cwe":["CWE-703"],
+    },
+    {
+        "id":"QA-002","sev":"LOW",
+        "name":"Console.log / print em produção",
+        "re": r"(console\.(log|warn|error)|print\s*\()\s*\(",
+        "description":"Saída de debug pode expor dados sensíveis em produção.",
+        "fix":"Remova logs de debug; use sistema de logging configurável por nível.",
+        "cwe":["CWE-215"],
+    },
+    {
+        "id":"QA-003","sev":"LOW",
+        "name":"TODO/FIXME de segurança",
+        "re": r"#\s*(TODO|FIXME|HACK|XXX|SECURITY|VULN|BUG).*",
+        "description":"Marcação de problema pendente no código.",
+        "fix":"Revise e resolva o item; registre no backlog de segurança.",
+        "cwe":["CWE-1164"],
+    },
+    {
+        "id":"QA-004","sev":"HIGH",
+        "name":"Segredo/credencial em comentário",
+        "re": r"(#|//|/\*)\s*.*(password|senha|secret|api.?key|token|credential)\s*[:=]\s*\S+",
+        "description":"Credencial em comentário é versionada e visível em histórico do git.",
+        "fix":"Remova; use git filter-branch ou BFG Repo-Cleaner para limpar histórico.",
+        "cwe":["CWE-615"],
+    },
 ]
 
-# -----------------------
-# Metadados enriquecidos + STRIDE
-# -----------------------
-# STRIDE: Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege
-RULE_META: Dict[str, Dict] = {
-    "SRV-001": {
-        "vulnerability": "Credenciais/API Keys hardcoded presentes no código.",
-        "risk": "Exposição de segredos; uso não autorizado de serviços e pivoting.",
-        "remediation": "Remover do código; usar secret manager; rotacionar imediatamente as chaves.",
-        "cwe": ["CWE-798"],
-        "references": ["https://cwe.mitre.org/data/definitions/798.html"],
-        "stride": ["Information Disclosure", "Elevation of Privilege"],
-    },
-    "SRV-002": {
-        "vulnerability": "Chaves privadas/certificados versionados.",
-        "risk": "Impersonation/MITM; decriptação indevida; comprometimento da infraestrutura.",
-        "remediation": "Não versionar chaves; usar vault/KMS; revogar e rotacionar imediatamente.",
-        "cwe": ["CWE-321"],
-        "references": ["https://cwe.mitre.org/data/definitions/321.html"],
-        "stride": ["Information Disclosure", "Spoofing", "Elevation of Privilege"],
-    },
-    "SRV-003": {
-        "vulnerability": "Atribuição direta de valores sensíveis.",
-        "risk": "Vazamento incidental via VCS/SDLC/observabilidade.",
-        "remediation": "Externalizar segredos; secret manager; limpeza de histórico.",
-        "cwe": ["CWE-312", "CWE-798"],
-        "references": ["https://cwe.mitre.org/data/definitions/312.html"],
-        "stride": ["Information Disclosure", "Elevation of Privilege"],
-    },
-    "SRV-004": {
-        "vulnerability": "Variável sensível vazia/nula.",
-        "risk": "Fallbacks inseguros e exposição de dados por configuração.",
-        "remediation": "Validar obrigatoriedade e formato; falhar build/deploy se ausente.",
-        "cwe": ["CWE-200"],
-        "references": ["https://cwe.mitre.org/data/definitions/200.html"],
-        "stride": ["Information Disclosure"],
-    },
-    "SRV-010": {
-        "vulnerability": "Redirect aberto com destino controlável.",
-        "risk": "Phishing; roubo de sessão e credenciais.",
-        "remediation": "Allowlist de destinos; normalizar e validar alvo.",
-        "cwe": ["CWE-601"],
-        "references": ["https://cwe.mitre.org/data/definitions/601.html"],
-        "stride": ["Spoofing"],
-    },
-    "SRV-011": {
-        "vulnerability": "Uso direto de parâmetros de entrada.",
-        "risk": "Amplia superfície para injeções/manipulação.",
-        "remediation": "Validação/normalização tipada; DTOs/binders seguros.",
-        "cwe": ["CWE-20"],
-        "references": ["https://cwe.mitre.org/data/definitions/20.html"],
-        "stride": ["Tampering"],
-    },
-    "SRV-020": {
-        "vulnerability": "Algoritmos fracos (MD5/SHA‑1/ROT13/CRC32).",
-        "risk": "Quebra de integridade (colisões) e falsificação.",
-        "remediation": "SHA‑256/512; para senhas, bcrypt/Argon2/PBKDF2 com sal/custo.",
-        "cwe": ["CWE-327", "CWE-328"],
-        "references": ["https://cwe.mitre.org/data/definitions/327.html"],
-        "stride": ["Tampering"],
-    },
-    "SRV-021": {
-        "vulnerability": "Base64 tratado como criptografia.",
-        "risk": "Reversão trivial; exposição de dados.",
-        "remediation": "Criptografia autenticada (AES‑GCM/ChaCha20‑Poly1305).",
-        "cwe": ["CWE-327"],
-        "references": ["https://cwe.mitre.org/data/definitions/327.html"],
-        "stride": ["Information Disclosure"],
-    },
-    "SRV-022": {
-        "vulnerability": "Pseudocriptografia 'caseira' por operações.",
-        "risk": "Proteção ilusória; engenharia reversa fácil.",
-        "remediation": "Usar bibliotecas criptográficas reconhecidas.",
-        "cwe": ["CWE-327", "CWE-330"],
-        "references": ["https://cwe.mitre.org/data/definitions/330.html"],
-        "stride": ["Tampering", "Information Disclosure"],
-    },
-    "SRV-030": {
-        "vulnerability": "Construção insegura de SQL (concatenação).",
-        "risk": "SQLi → exfiltração/alteração de dados; potencial RCE.",
-        "remediation": "Queries parametrizadas/ORM; validação; least privilege no DB.",
-        "cwe": ["CWE-89"],
-        "references": ["https://cwe.mitre.org/data/definitions/89.html"],
-        "stride": ["Tampering", "Information Disclosure", "Elevation of Privilege"],
-    },
-    "SRV-031": {
-        "vulnerability": "Execução dinâmica de código (eval/exec/new Function).",
-        "risk": "Code Injection e tomada de controle do processo.",
-        "remediation": "Remover eval/exec; mapeamentos determinísticos; sanitização forte.",
-        "cwe": ["CWE-94"],
-        "references": ["https://cwe.mitre.org/data/definitions/94.html"],
-        "stride": ["Elevation of Privilege", "Tampering"],
-    },
-    "SRV-032": {
-        "vulnerability": "Execução de comandos do SO via shell.",
-        "risk": "Command Injection; LPE/movimentação lateral/DoS.",
-        "remediation": "Sem shell; lista de argumentos; validar/escapar entradas.",
-        "cwe": ["CWE-78"],
-        "references": ["https://cwe.mitre.org/data/definitions/78.html"],
-        "stride": ["Elevation of Privilege", "Tampering", "Denial of Service"],
-    },
-    "SRV-033": {
-        "vulnerability": "Concatenação em comandos do SO.",
-        "risk": "Injeção de parâmetros controlados pelo usuário.",
-        "remediation": "Construir por lista de args; whitelists.",
-        "cwe": ["CWE-78"],
-        "references": ["https://cwe.mitre.org/data/definitions/78.html"],
-        "stride": ["Tampering", "Elevation of Privilege"],
-    },
-    "SRV-040": {
-        "vulnerability": "Acesso a arquivos sem validação de caminho.",
-        "risk": "Path Traversal → exposição ou alteração indevida.",
-        "remediation": "Normalizar/restringir caminhos (allowlist).",
-        "cwe": ["CWE-22"],
-        "references": ["https://cwe.mitre.org/data/definitions/22.html"],
-        "stride": ["Information Disclosure", "Tampering"],
-    },
-    "SRV-041": {
-        "vulnerability": "Upload sem validação/restrição.",
-        "risk": "Web shells/RCE; sobreposição de arquivos; DoS.",
-        "remediation": "Validar MIME/assinatura; AV; storage fora do webroot; renomear seguro.",
-        "cwe": ["CWE-434"],
-        "references": ["https://cwe.mitre.org/data/definitions/434.html"],
-        "stride": ["Elevation of Privilege", "Tampering", "Denial of Service"],
-    },
-    "SRV-042": {
-        "vulnerability": "Listagem de diretório habilitada.",
-        "risk": "Exposição de estrutura/artefatos úteis a ataque.",
-        "remediation": "Desabilitar autoindex; index seguro.",
-        "cwe": ["CWE-548"],
-        "references": ["https://cwe.mitre.org/data/definitions/548.html"],
-        "stride": ["Information Disclosure"],
-    },
-    "SRV-050": {
-        "vulnerability": "Cookie de sessão sem Secure.",
-        "risk": "Roubo de sessão em conexões não criptografadas.",
-        "remediation": "Secure/HttpOnly/SameSite + HTTPS estrito.",
-        "cwe": ["CWE-614"],
-        "references": ["https://cwe.mitre.org/data/definitions/614.html"],
-        "stride": ["Information Disclosure", "Elevation of Privilege"],
-    },
-    "SRV-051": {
-        "vulnerability": "Ausência/menção de headers de segurança.",
-        "risk": "Aumenta risco de XSS/clickjacking/MIME sniffing.",
-        "remediation": "Aplicar CSP, XFO, X-Content-Type-Options, HSTS.",
-        "cwe": ["CWE-693"],
-        "references": ["https://cwe.mitre.org/data/definitions/693.html"],
-        "stride": ["Information Disclosure", "Elevation of Privilege"],
-    },
-    "SRV-052": {
-        "vulnerability": "Desabilita verificação de certificado TLS.",
-        "risk": "MITM; vazamento de dados; manipulação de tráfego.",
-        "remediation": "Validar cadeia/hostname; não usar verify=False; pinning quando aplicável.",
-        "cwe": ["CWE-295"],
-        "references": ["https://cwe.mitre.org/data/definitions/295.html"],
-        "stride": ["Spoofing", "Information Disclosure", "Tampering"],
-    },
-    "SRV-060": {
-        "vulnerability": "Sinks de XSS (ex.: <script>, innerHTML, document.write).",
-        "risk": "Roubo de sessão, defacement, pivô entre contas.",
-        "remediation": "Escapar/encode por contexto; sanitização; CSP; templates seguros.",
-        "cwe": ["CWE-79"],
-        "references": ["https://cwe.mitre.org/data/definitions/79.html"],
-        "stride": ["Information Disclosure", "Tampering", "Elevation of Privilege"],
-    },
-    "SRV-070": {
-        "vulnerability": "Captura genérica de exceções.",
-        "risk": "Oculta trilhas e evidências; dificulta auditoria (repudiation).",
-        "remediation": "Capturar tipos específicos; falhar de forma segura; logging adequado.",
-        "cwe": ["CWE-703"],
-        "references": ["https://cwe.mitre.org/data/definitions/703.html"],
-        "stride": ["Repudiation"],
-    },
-    "SRV-071": {
-        "vulnerability": "Debug/log verboso em produção.",
-        "risk": "Exposição incidental de dados; rastro excessivo.",
-        "remediation": "Desabilitar debug; mascarar/filtrar dados sensíveis.",
-        "cwe": ["CWE-215"],
-        "references": ["https://cwe.mitre.org/data/definitions/215.html"],
-        "stride": ["Information Disclosure"],
-    },
-    "SRV-072": {
-        "vulnerability": "Segredo/senha em comentários.",
-        "risk": "Descoberta por varredura; vazamento acidental.",
-        "remediation": "Remover; hooks pre-commit; varredura recorrente.",
-        "cwe": ["CWE-200", "CWE-615"],
-        "references": ["https://cwe.mitre.org/data/definitions/200.html"],
-        "stride": ["Information Disclosure"],
-    },
-    "SRV-080": {
-        "vulnerability": "Menção de paths/endpoints sensíveis/administrativos.",
-        "risk": "Apoia reconhecimento/enumeração na cadeia de ataque.",
-        "remediation": "Proteger com auth/ACL; evitar log/telemetria de paths internos.",
-        "cwe": ["CWE-200"],
-        "references": ["https://cwe.mitre.org/data/definitions/200.html"],
-        "stride": ["Information Disclosure"],
-    },
-    "SRV-090": {
-        "vulnerability": "Rota possivelmente sem autenticação (heurística).",
-        "risk": "Acesso não autenticado a funções críticas.",
-        "remediation": "Aplicar decorators/filtros de autenticação/autorização; testes de acesso.",
-        "cwe": ["CWE-306"],
-        "references": ["https://cwe.mitre.org/data/definitions/306.html"],
-        "stride": ["Elevation of Privilege", "Information Disclosure"],
-    },
-}
-
-# -----------------------
-# Utilitários
-# -----------------------
+# Pré-compila regex
 for r in RULES:
-    r["rx"] = re.compile(r["re"], re.IGNORECASE)
+    r["rx"] = re.compile(r["re"], re.IGNORECASE | re.MULTILINE)
 
-def is_text_file(path: str, limit: int = 8192) -> bool:
+# ──────────────────────────────────────────────
+# SCAN
+# ──────────────────────────────────────────────
+
+def is_text(path: str) -> bool:
     try:
-        with open(path, "rb") as fh:
-            chunk = fh.read(limit)
-        return b"\x00" not in chunk
+        with open(path, "rb") as f:
+            return b"\x00" not in f.read(8192)
     except Exception:
         return False
 
 def should_skip(path: str) -> bool:
     parts = set(os.path.normpath(path).split(os.sep))
-    return any(d in parts for d in SKIP_DIRS)
+    return bool(parts & _SKIP_DIRS)
 
-def scan_file(path: str) -> List[Dict]:
-    findings: List[Dict] = []
-    if not is_text_file(path):
-        return findings
+def get_evidence(lines: List[str], line_no: int, ctx: int = 2) -> str:
+    """Retorna o snippet com N linhas de contexto ao redor."""
+    start = max(0, line_no - 1 - ctx)
+    end   = min(len(lines), line_no + ctx)
+    snip  = []
+    for i, ln in enumerate(lines[start:end], start=start+1):
+        marker = ">>> " if i == line_no else "    "
+        snip.append(f"{marker}{i}: {ln.rstrip()}")
+    return "\n".join(snip)
+
+def scan_file(path: str, root: str) -> List[Dict]:
+    if not is_text(path):
+        return []
     try:
         if os.path.getsize(path) > MAX_BYTES:
-            return findings
+            return []
     except OSError:
-        return findings
+        return []
 
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             lines = fh.readlines()
-    except Exception as e:
-        return [{
-            "rule_id": "SRV-000",
-            "title": "Erro de leitura",
-            "severity": "INFO",
-            "file": path,
-            "line": 1,
-            "message": f"Não foi possível analisar o arquivo: {e}",
-            "snippet": "",
-            "vulnerability": "",
-            "risk": "",
-            "remediation": "",
-            "cwe": [],
-            "references": [],
-            "stride": [],
-        }]
+            content = "".join(lines)
+    except Exception:
+        return []
 
-    for idx, line in enumerate(lines, start=1):
-        l = line.strip()
-        for rule in RULES:
-            if rule["rx"].search(line):
-                meta = RULE_META.get(rule["id"], {})
-                enriched_title = rule["name"]
-                if meta.get("vulnerability"):
-                    enriched_title += f" — {meta['vulnerability']}"
-                findings.append({
-                    "rule_id": rule["id"],
-                    "title": enriched_title,
-                    "severity": rule["sev"],
-                    "file": path,
-                    "line": idx,
-                    "message": f"Possível ocorrência: {rule['name']}",
-                    "snippet": l[:300],
-                    "vulnerability": meta.get("vulnerability", rule["name"]),
-                    "risk": meta.get("risk", ""),
-                    "remediation": meta.get("remediation", ""),
-                    "cwe": meta.get("cwe", []),
-                    "references": meta.get("references", []),
-                    "stride": meta.get("stride", []),
-                })
-
-    # Heurística: rotas sem autenticação (python)
-    if path.endswith(".py"):
-        findings.extend(detect_unauthenticated_routes(lines, path))
-    return dedup(findings)
-
-def dedup(findings: List[Dict]) -> List[Dict]:
+    rel_path = os.path.relpath(path, root).replace("\\", "/")
+    findings = []
     seen = set()
-    out = []
-    for f in findings:
-        key = (f["file"], f["line"], f["rule_id"], f.get("snippet",""))
-        if key not in seen:
+
+    for rule in RULES:
+        for m in rule["rx"].finditer(content):
+            line_no = content[:m.start()].count("\n") + 1
+            key = (rel_path, line_no, rule["id"])
+            if key in seen:
+                continue
             seen.add(key)
-            out.append(f)
-    return out
 
-def detect_unauthenticated_routes(lines: List[str], path: str) -> List[Dict]:
-    out = []
-    for i, raw in enumerate(lines):
-        s = raw.strip()
-        if s.startswith("def ") and "(" in s and s.endswith(":"):
-            window = lines[max(0, i-3):i]
-            decorators = [w.strip() for w in window if w.strip().startswith("@")]
-            protected = any(re.search(r"@(login_required|jwt_required|auth(\.|_)required)", d) for d in decorators)
-            if not protected:
-                meta = RULE_META.get("SRV-090", {})
-                enriched_title = "rota sem autenticação (heurístico)"
-                if meta.get("vulnerability"):
-                    enriched_title += f" — {meta['vulnerability']}"
-                out.append({
-                    "rule_id": "SRV-090",
-                    "title": enriched_title,
-                    "severity": "HIGH",
-                    "file": path,
-                    "line": i+1,
-                    "message": "Função de rota possivelmente sem decorator de autenticação (@login_required/@jwt_required/@auth_required).",
-                    "snippet": s[:300],
-                    "vulnerability": meta.get("vulnerability",""),
-                    "risk": meta.get("risk",""),
-                    "remediation": meta.get("remediation",""),
-                    "cwe": meta.get("cwe", []),
-                    "references": meta.get("references", []),
-                    "stride": meta.get("stride", []),
-                })
-    return out
+            evidence = get_evidence(lines, line_no, ctx=2)
+            findings.append({
+                "rule_id":     rule["id"],
+                "title":       rule["name"],
+                "description": rule["description"],
+                "severity":    rule["sev"],
+                "path":        rel_path,
+                "line":        line_no,
+                "evidence":    evidence,
+                "fix":         rule["fix"],
+                "cwe":         rule.get("cwe", []),
+            })
 
-def walk_files(root: str, exts: Iterable[str]) -> Iterable[str]:
-    exts = tuple(exts)
+    # Heurística extra: rotas sem auth em Python
+    if path.endswith(".py"):
+        for i, raw in enumerate(lines):
+            s = raw.strip()
+            if re.match(r"def\s+\w+\s*\(", s) and s.endswith(":"):
+                window = "".join(lines[max(0, i-5):i])
+                if re.search(r"@(app|router|bp)\.(get|post|put|delete|patch)", window):
+                    if not re.search(r"@(login_required|jwt_required|require_http_methods|permission_required|auth\.)", window):
+                        key = (rel_path, i+1, "AC-001")
+                        if key not in seen:
+                            seen.add(key)
+                            findings.append({
+                                "rule_id":     "AC-001",
+                                "title":       "Rota sem autenticação (heurístico)",
+                                "description": "Função de rota HTTP sem decorator de autenticação detectado nas 5 linhas anteriores.",
+                                "severity":    "HIGH",
+                                "path":        rel_path,
+                                "line":        i+1,
+                                "evidence":    get_evidence(lines, i+1, ctx=3),
+                                "fix":         "Adicione @login_required / @jwt_required antes da função.",
+                                "cwe":         ["CWE-306"],
+                            })
+
+    return findings
+
+def walk_files(root: str, exts: tuple) -> Iterable[str]:
     for r, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
         for f in files:
             full = os.path.join(r, f)
-            if should_skip(full):
-                continue
-            if f.lower().endswith(exts):
+            if not should_skip(full) and f.lower().endswith(exts):
                 yield full
 
-def summarize(findings: List[Dict]) -> Dict[str, int]:
-    counts = {k: 0 for k in SEV_ORDER}
+# ──────────────────────────────────────────────
+# SAÍDA JSON (formato plataforma)
+# ──────────────────────────────────────────────
+
+def to_platform_json(findings: List[Dict]) -> Dict:
+    """
+    Formato compatível com parse_custom() da plataforma.
+    Campos: rule_id, title, description, severity, path, line, evidence, fix
+    """
+    results = []
     for f in findings:
-        counts[f["severity"]] = counts.get(f["severity"], 0) + 1
-    return counts
+        results.append({
+            "rule_id":     f["rule_id"],
+            "title":       f["title"],
+            "description": f"{f['description']}\n\nEvidência:\n{f['evidence']}\n\nCorreção: {f['fix']}",
+            "severity":    f["severity"],
+            "path":        f["path"],
+            "line":        f["line"],
+            "evidence":    f["evidence"],
+            "fix":         f["fix"],
+            "cwe":         f.get("cwe", []),
+        })
+    return {"results": results}
 
-def to_json(findings: List[Dict]) -> Dict:
-    return {"results": findings}
-
-def _sarif_help_md(meta: Dict) -> str:
-    vuln = meta.get("vulnerability","")
-    risk = meta.get("risk","")
-    fix  = meta.get("remediation","")
-    refs = meta.get("references",[])
-    stride = meta.get("stride",[])
-    out = []
-    if vuln: out.append(f"**Vulnerabilidade:** {vuln}")
-    if risk: out.append(f"**Risco:** {risk}")
-    if fix:  out.append(f"**Mitigação:** {fix}")
-    if stride: out.append(f"**STRIDE:** {', '.join(stride)}")
-    if refs:
-        out.append("**Referências:**")
-        out.extend([f"- {u}" for u in refs])
-    return "\n".join(out) or "Consulte a documentação interna de segurança."
+# ──────────────────────────────────────────────
+# SAÍDA SARIF
+# ──────────────────────────────────────────────
 
 def to_sarif(findings: List[Dict]) -> Dict:
-    # Regras únicas com help/descrição e STRIDE
     rules_map: Dict[str, Dict] = {}
     for f in findings:
         rid = f["rule_id"]
         if rid not in rules_map:
-            meta = RULE_META.get(rid, {})
             rules_map[rid] = {
                 "id": rid,
-                "name": f.get("title", rid),
-                "shortDescription": {"text": f.get("title", rid)},
-                "fullDescription": {"text": f.get("vulnerability", f.get("title", rid))},
+                "name": f["title"],
+                "shortDescription": {"text": f["title"]},
+                "fullDescription":  {"text": f["description"]},
                 "defaultConfiguration": {"level": SEV_TO_SARIF.get(f["severity"], "note")},
-                "help": {"text": _sarif_help_md(meta), "markdown": _sarif_help_md(meta)},
+                "help": {
+                    "text": f"{f['description']}\n\nCorreção: {f['fix']}",
+                    "markdown": f"**Problema:** {f['description']}\n\n**Correção:** {f['fix']}\n\n**CWE:** {', '.join(f.get('cwe',[]))}",
+                },
                 "properties": {
-                    "problem.severity": f.get("severity", "INFO"),
-                    "stride": meta.get("stride", f.get("stride", [])),
-                    "tags": [*f.get("cwe", []), "security", "custom-review"],
+                    "problem.severity": f["severity"],
+                    "tags": [*f.get("cwe", []), "security"],
                 },
             }
 
@@ -490,100 +568,105 @@ def to_sarif(findings: List[Dict]) -> Dict:
     for f in findings:
         results.append({
             "ruleId": f["rule_id"],
-            "level": SEV_TO_SARIF.get(f["severity"], "note"),
-            "message": {"text": f.get("message", f.get("title", "Finding"))},
+            "level":  SEV_TO_SARIF.get(f["severity"], "note"),
+            "message": {"text": f"{f['description']} | Fix: {f['fix']}"},
             "locations": [{
                 "physicalLocation": {
-                    "artifactLocation": {"uri": f["file"]},
-                    "region": {"startLine": f["line"]}
+                    "artifactLocation": {"uri": f["path"]},
+                    "region": {
+                        "startLine": f["line"],
+                        "snippet":   {"text": f.get("evidence","")},
+                    },
                 }
             }],
             "properties": {
-                "snippet": f.get("snippet",""),
-                "cwe": f.get("cwe", []),
-                "vulnerability": f.get("vulnerability",""),
-                "risk": f.get("risk",""),
-                "remediation": f.get("remediation",""),
-                "references": f.get("references", []),
-                "stride": f.get("stride", []),
-            }
+                "evidence":    f.get("evidence",""),
+                "fix":         f.get("fix",""),
+                "cwe":         f.get("cwe",[]),
+                "severity":    f["severity"],
+            },
         })
 
     return {
         "version": "2.1.0",
         "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
-        "runs": [{
-            "tool": {"driver": {
-                "name": "Custom Security Review (STRIDE-enriched)",
-                "informationUri": "https://example.local/custom-security-review",
-                "rules": list(rules_map.values())
-            }},
-            "results": results
-        }]
+        "runs": [{"tool": {"driver": {
+            "name": "Custom Security Review",
+            "informationUri": "https://github.com/JNDEVSEC",
+            "rules": list(rules_map.values()),
+        }}, "results": results}],
     }
 
+# ──────────────────────────────────────────────
+# MAIN
+# ──────────────────────────────────────────────
+
 def main():
-    global SKIP_DIRS, MAX_BYTES
-    ap = argparse.ArgumentParser("custom_security_review")
-    ap.add_argument("--root", default=".", help="Diretório raiz do projeto")
-    ap.add_argument("--json-out", default="custom-review.json", help="Arquivo JSON de saída")
-    ap.add_argument("--sarif-out", default="custom-review.sarif", help="Arquivo SARIF 2.1.0 de saída")
-    ap.add_argument("--csv-out", help="Arquivo CSV de saída (opcional)")
-    ap.add_argument("--max-bytes", type=int, default=MAX_BYTES, help="Tamanho máximo por arquivo")
-    ap.add_argument("--include-extensions", default=",".join(DEFAULT_EXTS), help="Extensões que serão analisadas (csv)")
-    ap.add_argument("--exclude-dirs", default=",".join(sorted(SKIP_DIRS)), help="Pastas a ignorar (csv)")
-    ap.add_argument("--fail-on", choices=SEV_ORDER, help="Falha (exit 1) se houver achados >= severidade informada")
+    ap = argparse.ArgumentParser("security_review")
+    ap.add_argument("--root",      default=".", help="Diretório raiz")
+    ap.add_argument("--json-out",  default="custom-review.json")
+    ap.add_argument("--sarif-out", default="custom-review.sarif")
+    ap.add_argument("--csv-out",   help="CSV opcional")
+    ap.add_argument("--fail-on",   choices=SEV_ORDER, help="Falha se houver achados >= severidade")
+    ap.add_argument("--include-extensions", default=",".join(DEFAULT_EXTS))
+    ap.add_argument("--exclude-dirs",       default=",".join(sorted(_SKIP_DIRS_DEFAULT)))
     args = ap.parse_args()
 
-    MAX_BYTES = int(args.max_bytes)
-    exts = [e.strip().lower() for e in args.include_extensions.split(",") if e.strip()]
-    SKIP_DIRS = set([d.strip() for d in args.exclude_dirs.split(",") if d.strip()])
+    exts   = tuple(e.strip().lower() for e in args.include_extensions.split(",") if e.strip())
+    global _SKIP_DIRS
+    _SKIP_DIRS = set(d.strip() for d in args.exclude_dirs.split(",") if d.strip())
 
     all_findings: List[Dict] = []
     for p in walk_files(args.root, exts):
-        all_findings.extend(scan_file(p))
-    all_findings = dedup(all_findings)
+        all_findings.extend(scan_file(p, args.root))
+
+    # Deduplica
+    seen = set()
+    deduped = []
+    for f in all_findings:
+        k = (f["path"], f["line"], f["rule_id"])
+        if k not in seen:
+            seen.add(k)
+            deduped.append(f)
+
+    # Ordena por severidade desc, depois por arquivo e linha
+    sev_idx = {s: i for i, s in enumerate(reversed(SEV_ORDER))}
+    deduped.sort(key=lambda f: (sev_idx.get(f["severity"], 99), f["path"], f["line"]))
 
     # Saídas
     with open(args.json_out, "w", encoding="utf-8") as fj:
-        json.dump(to_json(all_findings), fj, ensure_ascii=False, indent=2)
+        json.dump(to_platform_json(deduped), fj, ensure_ascii=False, indent=2)
 
-    with open(args.sarif_out, "w", encoding="utf-8") as fsr:
-        json.dump(to_sarif(all_findings), fsr, ensure_ascii=False, indent=2)
+    with open(args.sarif_out, "w", encoding="utf-8") as fs:
+        json.dump(to_sarif(deduped), fs, ensure_ascii=False, indent=2)
 
-    # (Opcional) CSV enriquecido
     if args.csv_out:
         import csv
         with open(args.csv_out, "w", encoding="utf-8", newline="") as fc:
-            writer = csv.writer(fc)
-            writer.writerow([
-                "rule_id","title","severity","file","line",
-                "message","snippet",
-                "vulnerability","risk","remediation","cwe","references","stride"
-            ])
-            for f in all_findings:
-                writer.writerow([
-                    f.get("rule_id",""),
-                    f.get("title",""),
-                    f.get("severity",""),
-                    f.get("file",""),
-                    f.get("line",""),
-                    f.get("message",""),
-                    str(f.get("snippet","")).replace("\n","\\n")[:300],
-                    f.get("vulnerability",""),
-                    f.get("risk",""),
-                    f.get("remediation",""),
-                    ",".join(f.get("cwe",[])),
-                    ",".join(map(str, f.get("references",[]))),
-                    ",".join(f.get("stride",[])),
+            w = csv.writer(fc)
+            w.writerow(["rule_id","severity","title","path","line","description","evidence","fix","cwe"])
+            for f in deduped:
+                w.writerow([
+                    f["rule_id"], f["severity"], f["title"],
+                    f["path"], f["line"], f["description"],
+                    f.get("evidence","").replace("\n","\\n"),
+                    f["fix"], ",".join(f.get("cwe",[])),
                 ])
 
-    counts = summarize(all_findings)
+    # Resumo
+    counts = {s: 0 for s in SEV_ORDER}
+    for f in deduped:
+        counts[f["severity"]] += 1
     total = sum(counts.values())
-    print(f"[custom-review] encontrados {total} achados -> {counts}")
+
+    print(f"[security_review] {total} achados: "
+          + " | ".join(f"{s}:{counts[s]}" for s in reversed(SEV_ORDER) if counts[s] > 0))
+    print(f"  JSON  → {args.json_out}")
+    print(f"  SARIF → {args.sarif_out}")
 
     if args.fail_on:
-        if any(sev_gte(s, args.fail_on) and c > 0 for s, c in counts.items()):
+        idx = SEV_ORDER.index(args.fail_on)
+        if any(counts[s] > 0 for s in SEV_ORDER[idx:]):
             sys.exit(1)
 
 if __name__ == "__main__":
