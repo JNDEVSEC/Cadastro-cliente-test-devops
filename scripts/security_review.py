@@ -26,7 +26,7 @@ _SKIP_DIRS_DEFAULT = {
     "node_modules","dist","build","out",".venv","venv","__pycache__",
     ".next",".nuxt",".yarn",".pnpm-store","coverage","vendor",
     "migrations","staticfiles",".terraform",
-    "scripts"   # ← adicionar aqui
+    "scripts",".github/workflows"   # ← adicionar aqui
 }
 MAX_BYTES = 1_000_000
 SEV_ORDER = ["INFO","LOW","MEDIUM","HIGH","CRITICAL"]
