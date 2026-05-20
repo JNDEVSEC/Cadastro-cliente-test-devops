@@ -1,4 +1,4 @@
-name: build
+name: Security Pipeline
 
 on:
   push:
@@ -7,11 +7,8 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  security-events: write
-
 jobs:
   security:
     uses: JNDEVSEC/security-templates/.github/workflows/security-scan.yml@v2
     secrets: inherit
+
