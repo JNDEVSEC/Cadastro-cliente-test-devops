@@ -9,6 +9,6 @@ on:
 
 jobs:
   security:
-    uses: JNDEVSEC/security-templates/.github/workflows/security-scan.yml@main
+    uses: JNDEVSEC/security-templates/.github/workflows/security_scan.yml@main
     secrets: inherit
 
